@@ -69,7 +69,7 @@ def detail(label: str, value: str) -> None:
 
 def substep(text: str) -> None:
     """An indented sub-line under a step, for progress within a stage."""
-    print(f"  {paint(DIM, '·')} {text}")
+    print(f"  {paint(DIM, '·')} {text}", flush=True)
 
 
 def hint(text: str) -> None:

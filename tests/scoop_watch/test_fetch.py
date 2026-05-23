@@ -234,51 +234,31 @@ class _FailingClient:
         return iter([])
 
 
-def test_fetch_skips_a_failing_query_and_continues(monkeypatch):
-    """A 429 (or other arxiv.ArxivError) on one query is reported via the
-    callback and the remaining queries still run."""
-    states = iter([arxiv.HTTPError("u", 1, 429), None])  # first fails, second OK
-
-    class _Client(_FailingClient):
-        def results(self, search):
-            err = next(states)
-            if err is not None:
-                raise err
-            yield _FakeResult("2605.99999", ["physics.chem-ph"])
-
-    monkeypatch.setattr(fetch.arxiv, "Client", _Client)
+def test_fetch_aborts_on_first_failing_query(monkeypatch):
+    """A 429 on any merged request raises FetchAborted immediately. The
+    callback still fires so the CLI sees which query caused it; remaining
+    queries are skipped so a partial-and-misleading result is not produced."""
+    _FailingClient.raise_for = arxiv.HTTPError("https://x/y", 1, 429)
+    monkeypatch.setattr(fetch.arxiv, "Client", _FailingClient)
     monkeypatch.setattr(fetch.arxiv, "Search", lambda **kwargs: None)
     failures: list[tuple[str, str]] = []
 
-    papers = fetch.fetch(
-        [
-            {"name": "Q1", "terms": ["a"], "operator": "OR"},
-            {"name": "Q2", "terms": ["b"], "operator": "OR"},
-        ],
-        categories=["physics.chem-ph"],
-        days=7,
-        on_query_error=lambda name, msg: failures.append((name, msg)),
-    )
-
-    assert [name for name, _ in failures] == ["Q1"]
-    assert [p.arxiv_id for p in papers] == ["2605.99999"]
-
-
-def test_fetch_raises_when_every_query_fails(monkeypatch):
-    """If arXiv refuses every query, surface a clear error instead of silently
-    returning an empty list (which would write an empty briefing)."""
-    _FailingClient.raise_for = arxiv.HTTPError("u", 1, 429)
-    monkeypatch.setattr(fetch.arxiv, "Client", _FailingClient)
-    monkeypatch.setattr(fetch.arxiv, "Search", lambda **kwargs: None)
-
     import pytest
 
-    with pytest.raises(RuntimeError, match="rate limit"):
+    with pytest.raises(fetch.FetchAborted) as excinfo:
         fetch.fetch(
-            [{"name": "Q1", "terms": ["a"], "operator": "OR"}],
+            [
+                {"name": "Q1", "terms": ["a"], "operator": "OR"},
+                {"name": "Q2", "terms": ["b"], "operator": "OR"},
+            ],
             categories=[],
             days=7,
+            on_query_error=lambda name, msg: failures.append((name, msg)),
         )
+
+    assert [name for name, _ in failures] == ["Q1"]
+    assert excinfo.value.query == "Q1"
+    assert "429" in excinfo.value.error
 
 
 def test_fetch_reports_progress_per_merged_request(monkeypatch):
@@ -300,26 +280,34 @@ def test_fetch_reports_progress_per_merged_request(monkeypatch):
         progress=lines.append,
     )
 
-    assert len(lines) == 3
-    assert lines[0].startswith("[1/3]")
-    assert lines[1].startswith("[2/3]")
-    assert lines[2].startswith("[3/3]")
+    # Two lines per merged request: a pre-request "requesting..." so the user
+    # sees the loop is alive while arXiv stalls, then the post-request tally.
+    assert len(lines) == 6
+    assert lines[0] == "[1/3] q1: requesting..."
+    assert lines[1].startswith("[1/3] q1:") and "returned" in lines[1]
+    assert lines[2] == "[2/3] q2: requesting..."
+    assert lines[4] == "[3/3] q3: requesting..."
 
 
-def test_fetch_dedupes_and_filters_categories(monkeypatch):
+def test_fetch_dedupes_and_keeps_papers_outside_config_categories(monkeypatch):
+    """Category is intentionally not a hard filter: arXiv's category index is
+    loose and authors cross-post inconsistently, so a paper from outside the
+    config categories is kept (with its real categories preserved) and the
+    synthesis agent decides relevance from project.md instead."""
     _FakeClient.results_to_yield = [
         _FakeResult("2605.00001", ["physics.chem-ph"]),
         _FakeResult("2605.00001", ["physics.chem-ph"]),  # duplicate id
-        _FakeResult("2605.00002", ["cs.CV"]),  # category not requested
+        _FakeResult("2605.00002", ["cs.CV"]),  # outside config categories
     ]
     monkeypatch.setattr(fetch.arxiv, "Client", _FakeClient)
     monkeypatch.setattr(fetch.arxiv, "Search", lambda **kwargs: None)
 
     papers = fetch.fetch(
         [{"terms": ["x"], "operator": "OR"}],
-        categories=["physics.chem-ph"],
+        categories=["physics.chem-ph"],  # passed for backward compat, not used
         days=7,
     )
 
-    assert [p.arxiv_id for p in papers] == ["2605.00001"]
-    assert papers[0].authors == ["A. Researcher"]
+    assert sorted(p.arxiv_id for p in papers) == ["2605.00001", "2605.00002"]
+    cv_paper = next(p for p in papers if p.arxiv_id == "2605.00002")
+    assert cv_paper.primary_category == "cs.CV"  # real category preserved

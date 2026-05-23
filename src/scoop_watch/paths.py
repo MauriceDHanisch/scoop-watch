@@ -89,6 +89,16 @@ def fetch_archive_dir(name: str) -> Path:
     return project_dir(name) / "fetch-archive"
 
 
+def logs_dir() -> Path:
+    """Global logs directory under the data root (one folder for all projects).
+
+    Created on first write. Failed fetches land here as
+    ``<project>_<timestamp>.log`` so a missed run leaves a paper trail the user
+    can read to decide whether to retry.
+    """
+    return data_root() / "logs"
+
+
 def read_json_path(name: str) -> Path:
     """Per-project list of arXiv ids the user has marked as read.
 

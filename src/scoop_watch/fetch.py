@@ -198,15 +198,30 @@ def _matched_queries_for(entry: _MergedQuery, title: str, abstract: str) -> list
     return result
 
 
+class FetchAborted(RuntimeError):
+    """Raised on the first failed merged request to halt the fetch stage.
+
+    Carries ``query``, ``error`` and ``url`` so the CLI can write a useful log
+    and the user can decide whether to retry or wait. The fetch is partial by
+    the time this fires; the caller should discard it and not synthesize.
+    """
+
+    def __init__(self, query: str, error: str, url: str) -> None:
+        super().__init__(f"fetch aborted on query '{query}': {error}")
+        self.query = query
+        self.error = error
+        self.url = url
+
+
 def fetch(
     queries: list[dict[str, Any]],
-    categories: list[str],
+    categories: list[str],  # kept in the signature for backward compat; unused
     days: int,
     max_results: int = 200,
     on_query_error: Callable[[str, str], None] | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> list[Paper]:
-    """Run every query, filter to the given categories, dedupe by arXiv id.
+    """Run every merged request and return the deduped union of results.
 
     AND queries that share an (n-1)-term subset are smart-merged into a single
     arXiv request (``anchor AND (alt1 OR alt2 ...)``), which trims request
@@ -215,18 +230,24 @@ def fetch(
     (always, exact) plus any individual original-query names whose terms also
     appear in the paper's title or abstract (best-effort).
 
-    A query that fails (HTTP 429, transient parse error, ...) is reported via
-    ``on_query_error`` and skipped; remaining queries still run. Only when
-    every request fails does this raise ``RuntimeError``.
+    Category is **not** used as a hard filter; arXiv's category index is loose
+    and authors cross-post inconsistently, so a hard cut drops relevant
+    cross-discipline papers. ``primary_category`` and ``categories`` are still
+    stored on each Paper and passed downstream, where the synthesis agent
+    treats them as a soft signal.
+
+    Strict failure: the first request that fails (HTTP 429, transient parse
+    error, ...) is reported via ``on_query_error`` and the function raises
+    ``FetchAborted``. The caller is expected to log the failure and skip
+    synthesis. ``categories`` is kept in the signature for backward compat.
     """
+    del categories  # see docstring: category filtering is intentionally off
+
     # Defaults match arXiv's documented "no more than one request every three
-    # seconds". Bigger spacing / more retries did not help in practice: once
-    # the IP is in penalty, neither value clears it within a useful window.
+    # seconds". Bigger spacing / more retries did not help in practice.
     client = arxiv.Client(page_size=100, delay_seconds=3.0, num_retries=3)
-    category_set = set(categories)
     rows: dict[str, dict[str, Any]] = {}
     matches: dict[str, list[str]] = {}
-    failed: list[str] = []
 
     merged_entries = group_queries(queries)
     total = len(merged_entries)
@@ -240,19 +261,20 @@ def fetch(
             sort_by=arxiv.SortCriterion.SubmittedDate,
             sort_order=arxiv.SortOrder.Descending,
         )
+        # Pre-request line so the user sees the loop is alive even when arXiv
+        # holds the response (the client enforces 3s spacing and may retry on
+        # 429, which can stall a single request for tens of seconds).
+        report(f"[{idx}/{total}] {entry.name}: requesting...")
         try:
             results = list(client.results(search))
         except arxiv.ArxivError as error:
-            failed.append(entry.name)
             if on_query_error is not None:
                 on_query_error(entry.name, str(error))
-            continue
+            url = getattr(error, "url", "") or ""
+            raise FetchAborted(entry.name, str(error), url) from error
 
         rows_before = len(rows)
         for result in results:
-            result_categories = list(result.categories)
-            if category_set and not category_set.intersection(result_categories):
-                continue
             paper_id = result.get_short_id()
             title = " ".join(result.title.split())
             abstract = " ".join(result.summary.split())
@@ -268,7 +290,7 @@ def fetch(
                 authors=[author.name for author in result.authors],
                 abstract=abstract,
                 submitted=result.published.date().isoformat(),
-                categories=result_categories,
+                categories=list(result.categories),
                 primary_category=result.primary_category,
                 url=result.entry_id,
             )
@@ -276,12 +298,6 @@ def fetch(
         report(
             f"[{idx}/{total}] {entry.name}: "
             f"{len(results)} returned, {new_papers} new ({len(rows)} unique)"
-        )
-
-    if failed and len(failed) == len(merged_entries):
-        raise RuntimeError(
-            f"arXiv rejected every query ({len(failed)} of {len(merged_entries)}); "
-            "likely a rate limit, try again in a few minutes"
         )
 
     papers = [Paper(**rows[pid], matched_queries=list(matches[pid])) for pid in rows]

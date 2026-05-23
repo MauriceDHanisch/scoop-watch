@@ -6,6 +6,7 @@ import argparse
 import datetime as dt
 import json
 import sys
+from pathlib import Path
 
 from . import (
     __version__,
@@ -107,6 +108,28 @@ def cmd_author(args: argparse.Namespace) -> int:
     return 0
 
 
+def _write_fetch_failure_log(project: str, aborted: fetch.FetchAborted) -> Path:
+    """Persist a failed fetch to ``logs/<project>_<timestamp>.log``.
+
+    The log captures the offending query name, error message, and the request
+    URL so the user can decide whether to retry or wait for arXiv to recover.
+    The directory is created on first write.
+    """
+    logs = paths.logs_dir()
+    logs.mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    log_path = logs / f"{project}_{stamp}.log"
+    body = (
+        f"timestamp: {dt.datetime.now().isoformat(timespec='seconds')}\n"
+        f"project:   {project}\n"
+        f"query:     {aborted.query}\n"
+        f"error:     {aborted.error}\n"
+        f"url:       {aborted.url}\n"
+    )
+    log_path.write_text(body, encoding="utf-8")
+    return log_path
+
+
 def _run_one(project: str) -> None:
     project_config = config.load_config(project)
     days = config.recent_days()
@@ -123,13 +146,20 @@ def _run_one(project: str) -> None:
     def _warn_query(name: str, error: str) -> None:
         ui.substep(f"query '{name}' failed: {error.splitlines()[0]}")
 
-    papers = fetch.fetch(
-        queries,
-        project_config.get("categories", []),
-        days,
-        on_query_error=_warn_query,
-        progress=ui.substep,
-    )
+    try:
+        papers = fetch.fetch(
+            queries,
+            project_config.get("categories", []),
+            days,
+            on_query_error=_warn_query,
+            progress=ui.substep,
+        )
+    except fetch.FetchAborted as aborted:
+        log_path = _write_fetch_failure_log(project, aborted)
+        ui.warn(f"{project}  fetch aborted; no briefing written")
+        ui.detail("log", str(log_path))
+        ui.hint("arXiv often clears in minutes. Rerun `scoop-watch run` to retry.")
+        return
 
     # Same-day reruns are kept as -v2 / -v3 / ... rather than overwriting.
     stem = paths.next_version_stem(project)
