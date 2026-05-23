@@ -131,9 +131,12 @@ def _run_passes(
     passes: list[tuple[str, list[Paper], str]],
     report: Callable[[str], None],
 ) -> dict[str, str]:
-    """Run every synthesis pass concurrently; return {tier heading: body}."""
-    for heading, tier_papers, _scope in passes:
-        report(f"{heading}: {len(tier_papers)} papers")
+    """Run every synthesis pass concurrently; return {tier heading: body}.
+
+    The caller is expected to have already reported the per-tier queue (so
+    empty tiers are visible too). This function only reports `done` lines as
+    futures complete, plus the dict of agent outputs.
+    """
     if not passes:
         return {}
 
@@ -221,6 +224,11 @@ def synthesize(
     # Only non-empty tiers reach the agent; empty tiers render a static
     # placeholder so their heading is still visible in the briefing (a
     # disappearing tier reads as "did it crash?" rather than "nothing new").
+    # Progress is reported for every tier — including the empty ones — so
+    # the user can see at a glance how today's papers split across windows.
+    for heading, tier_papers, _scope in tier_definitions:
+        suffix = "" if tier_papers else " (skipped)"
+        report(f"{heading}: {len(tier_papers)} papers{suffix}")
     passes: list[tuple[str, list[Paper], str]] = [
         (heading, tier_papers, scope)
         for heading, tier_papers, scope in tier_definitions
