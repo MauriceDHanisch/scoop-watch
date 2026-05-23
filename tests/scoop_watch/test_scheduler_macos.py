@@ -50,10 +50,21 @@ def test_next_firing_skips_unscheduled_weekdays():
     assert nxt == dt.datetime(2026, 5, 29, 4, 0)  # next Fri
 
 
+def test_plist_dir_is_not_library_launchagents(monkeypatch, tmp_path):
+    """Regression: plists must NOT be written into ~/Library/LaunchAgents/,
+    because launchd auto-loads everything in that directory at login. Storing
+    them under the data root makes the on-disk schedule reboot-ephemeral —
+    only ``scoop-watch arm`` bootstraps it into the running session."""
+    monkeypatch.setenv("WATCH_DATA_DIR", str(tmp_path))
+    target = scheduler_macos.paths.launchd_plist_dir()
+    assert "Library/LaunchAgents" not in str(target)
+    assert target.is_relative_to(tmp_path)
+
+
 def test_plist_round_trips_through_disk(tmp_path, monkeypatch):
     """A plist written by ``arm`` parses back into the same schedule via
     ``_read_calendar_from_plist`` (used by ``timer_line``)."""
-    monkeypatch.setattr(scheduler_macos.paths, "launchd_agent_dir", lambda: tmp_path)
+    monkeypatch.setattr(scheduler_macos.paths, "launchd_plist_dir", lambda: tmp_path)
     monkeypatch.setattr(scheduler_macos.paths, "logs_dir", lambda: tmp_path / "logs")
     monkeypatch.setattr(
         scheduler_macos.paths, "shim_path", lambda: "/usr/local/bin/scoop-watch"

@@ -53,9 +53,12 @@ curl -fsSL https://raw.githubusercontent.com/MauriceDHanisch/scoop-watch/main/in
 ```
 
 This installs `uv` if it is missing, places the program in
-`~/.local/share/scoop-watch` (a uv-managed isolated environment), puts a
-`scoop-watch` command on your PATH, and runs an interactive first-time setup.
-Re-run the same command to update. Uninstall with `uninstall.sh`.
+`~/.local/share/scoop-watch` (a uv-managed isolated environment), and puts a
+`scoop-watch` command on your PATH. Once it finishes, run
+`scoop-watch setup` to configure agent, model, schedule and search window
+(every prompt shows the current value as the default, so re-running it later
+to tweak a single setting is one Enter away). Re-run the install command any
+time to update. Uninstall with `uninstall.sh`.
 
 You need one agent CLI installed and logged in: `claude` (default) or `codex`.
 Scoop-watch autodetects which is available; override it in setup.

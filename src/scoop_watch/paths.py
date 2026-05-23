@@ -155,10 +155,17 @@ def systemd_user_dir() -> Path:
     return Path.home() / ".config" / "systemd" / "user"
 
 
-def launchd_agent_dir() -> Path:
-    """macOS LaunchAgents directory. Plists are written here for visibility,
-    then bootstrapped into the user GUI session for reboot-ephemeral runs."""
-    return Path.home() / "Library" / "LaunchAgents"
+def launchd_plist_dir() -> Path:
+    """Where macOS LaunchAgent plists are stored on disk.
+
+    Deliberately NOT ``~/Library/LaunchAgents``: launchd auto-loads anything in
+    that directory at login, which would defeat the reboot-ephemeral semantic
+    we want to match Linux's `systemctl --user start` (no enable). Putting the
+    plist under the data root means it survives reboot as a serialized
+    schedule but only takes effect when the user runs ``scoop-watch arm``,
+    which bootstraps it into ``gui/$UID`` for the current session.
+    """
+    return data_root() / ".scheduler"
 
 
 def shim_path() -> Path:

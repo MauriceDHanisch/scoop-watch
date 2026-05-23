@@ -1,9 +1,12 @@
 """launchd LaunchAgent management — macOS counterpart to scheduler_linux.
 
-Reboot-ephemeral by design: agents are bootstrapped into ``gui/$UID`` (the
-current user's Aqua session) rather than dropped into ``~/Library/LaunchAgents``
-permanently, so logout or reboot drops them. Resuming is a deliberate
-``scoop-watch arm``, matching the Linux semantics.
+Reboot-ephemeral by design: the plist lives at
+``<data_root>/.scheduler/com.scoop-watch.<project>.plist`` (NOT
+``~/Library/LaunchAgents``, which launchd auto-loads at login), and ``arm``
+bootstraps it into ``gui/$UID`` so logout or reboot drops the in-memory
+service. The on-disk plist is a serialized schedule that only takes effect
+when the user runs ``scoop-watch arm`` again, matching the Linux
+``systemctl --user start`` (no enable) semantic.
 
 launchctl exposes no direct "next firing" reading, so ``timer_line`` computes
 the next-run timestamp from the schedule client-side; ``last_run_line`` parses
@@ -61,7 +64,7 @@ def _label(project: str) -> str:
 
 
 def _plist_path(project: str) -> Path:
-    return paths.launchd_agent_dir() / f"{_label(project)}.plist"
+    return paths.launchd_plist_dir() / f"{_label(project)}.plist"
 
 
 def _domain_target() -> str:
@@ -124,7 +127,7 @@ def _next_firing(
 
 def arm(project: str, weekdays: list[str], time: str) -> None:
     """Write the LaunchAgent plist and bootstrap it into the user GUI session."""
-    plist_dir = paths.launchd_agent_dir()
+    plist_dir = paths.launchd_plist_dir()
     plist_dir.mkdir(parents=True, exist_ok=True)
     log_path = paths.logs_dir() / f"{project}_launchd.log"
     paths.logs_dir().mkdir(parents=True, exist_ok=True)
