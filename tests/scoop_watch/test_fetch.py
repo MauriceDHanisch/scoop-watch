@@ -90,6 +90,90 @@ def test_fetch_records_every_query_that_matched_a_paper(monkeypatch):
     assert papers[0].matched_queries == ["Query A", "Query B"]
 
 
+def test_group_queries_merges_and_with_shared_term():
+    """AND queries that share an (n-1)-term subset collapse into one entry."""
+    queries = [
+        {"name": "fno_scale", "operator": "AND", "terms": ["FNO", "scale"]},
+        {"name": "fno_res", "operator": "AND", "terms": ["FNO", "resolution"]},
+        {"name": "fno_multi", "operator": "AND", "terms": ["FNO", "multiscale"]},
+        {"name": "loner", "operator": "AND", "terms": ["alpha", "beta"]},
+        {"name": "or_q", "operator": "OR", "terms": ["x", "y"]},
+    ]
+    merged = fetch.group_queries(queries)
+
+    grouped = [m for m in merged if m.operator == "AND-OR"]
+    passthrough = [m for m in merged if m.operator == "passthrough"]
+    assert len(grouped) == 1
+    assert grouped[0].anchor == ("FNO",)
+    assert set(grouped[0].alternatives) == {"scale", "resolution", "multiscale"}
+    assert {q.get("name") for q in grouped[0].originals} == {
+        "fno_scale",
+        "fno_res",
+        "fno_multi",
+    }
+    # 'loner' has no shared term with others, 'or_q' is an OR query.
+    assert {m.name for m in passthrough} == {"loner", "or_q"}
+
+
+def test_merged_query_string_anchor_and_alternatives():
+    """The merged arXiv expression is `(anchor) AND (alts ORed)`."""
+    entry = fetch._MergedQuery(
+        name="FNO (any)",
+        operator="AND-OR",
+        anchor=("Fourier neural operator",),
+        alternatives=("scale", "resolution"),
+        originals=(),
+    )
+    query = fetch._merged_query_string(entry, days=7)
+    assert '(all:"Fourier neural operator")' in query
+    assert "all:scale OR all:resolution" in query
+    assert "submittedDate:" in query
+
+
+def test_matched_queries_hybrid_attribution():
+    """Group label always present; individual original names added only when
+    the paper's title+abstract text satisfies that original's terms."""
+    entry = fetch._MergedQuery(
+        name="FNO (any)",
+        operator="AND-OR",
+        anchor=("Fourier neural operator",),
+        alternatives=("scale", "resolution"),
+        originals=(
+            {
+                "name": "fno_scale",
+                "operator": "AND",
+                "terms": ["Fourier neural operator", "scale"],
+            },
+            {
+                "name": "fno_res",
+                "operator": "AND",
+                "terms": ["Fourier neural operator", "resolution"],
+            },
+        ),
+    )
+    names = fetch._matched_queries_for(
+        entry,
+        title="Multi-scale FNO for OF-DFT",
+        abstract="We use a Fourier neural operator at multiple scales.",
+    )
+    assert names[0] == "FNO (any)"  # group label first
+    assert (
+        "fno_scale" in names
+    )  # text contains both 'fourier neural operator' and 'scale'
+    assert "fno_res" not in names  # 'resolution' is not in title or abstract
+
+
+def test_matched_queries_passthrough_returns_original_name_only():
+    entry = fetch._MergedQuery(
+        name="solo",
+        operator="passthrough",
+        anchor=(),
+        alternatives=(),
+        originals=({"name": "solo", "operator": "OR", "terms": ["foo"]},),
+    )
+    assert fetch._matched_queries_for(entry, "any", "any") == ["solo"]
+
+
 def test_by_recency_splits_into_non_overlapping_tiers():
     today = dt.date(2026, 5, 22)
 

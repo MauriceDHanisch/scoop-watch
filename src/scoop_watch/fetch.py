@@ -11,6 +11,7 @@ import datetime as dt
 import json
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
+from itertools import combinations
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,147 @@ def build_query(terms: list[str], operator: str, days: int) -> str:
     return f"({joined}) AND {_date_clause(days)}"
 
 
+@dataclass(frozen=True)
+class _MergedQuery:
+    """One arXiv request built from one or more config-level queries.
+
+    ``operator == "passthrough"`` carries a single config query verbatim.
+    ``operator == "AND-OR"`` represents a merged group:
+    ``anchor`` are AND-shared terms, ``alternatives`` are the per-query
+    distinguishing terms that get OR'd. The resulting arXiv expression is::
+
+        (anchor[0] AND anchor[1] ...) AND (alt[0] OR alt[1] ...)
+    """
+
+    name: str
+    operator: str
+    anchor: tuple[str, ...]
+    alternatives: tuple[str, ...]
+    originals: tuple[dict[str, Any], ...]
+
+
+def group_queries(queries: list[dict[str, Any]]) -> list[_MergedQuery]:
+    """Smart group-merge: AND queries that share (n-1) terms merge into one
+    request. OR queries and ungroupable AND queries pass through unchanged.
+
+    Greedy: at each step, pick the (n-1)-term subset shared by the most
+    remaining AND queries and pull those into one merged group. Stop when no
+    subset is shared by at least two queries.
+    """
+    and_queries: list[dict[str, Any]] = []
+    or_queries: list[dict[str, Any]] = []
+    for query in queries:
+        op = str(query.get("operator", "OR")).upper()
+        (and_queries if op == "AND" else or_queries).append(query)
+
+    merged: list[_MergedQuery] = []
+    remaining = list(and_queries)
+
+    while remaining:
+        anchor_to_queries: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+        for query in remaining:
+            terms = list(query.get("terms", []))
+            if len(terms) < 2:
+                continue
+            for anchor in combinations(sorted(terms), len(terms) - 1):
+                anchor_to_queries.setdefault(anchor, []).append(query)
+
+        if not anchor_to_queries:
+            break
+
+        # Pick the anchor used by the most queries; lexicographic tiebreak
+        # so the result is deterministic.
+        best_anchor, best_group = max(
+            anchor_to_queries.items(),
+            key=lambda item: (len(item[1]), item[0]),
+        )
+        if len(best_group) < 2:
+            break
+
+        # The "alternatives" are the leftover terms each grouped query
+        # contributes (the one term that isn't in the anchor).
+        alts: list[str] = []
+        for query in best_group:
+            for term in query["terms"]:
+                if term not in best_anchor and term not in alts:
+                    alts.append(term)
+
+        anchor_label = " AND ".join(best_anchor)
+        merged.append(
+            _MergedQuery(
+                name=f"{anchor_label} (any)",
+                operator="AND-OR",
+                anchor=tuple(best_anchor),
+                alternatives=tuple(alts),
+                originals=tuple(best_group),
+            )
+        )
+        for query in best_group:
+            remaining.remove(query)
+
+    # Remaining AND queries and all OR queries pass through unchanged.
+    for query in remaining + or_queries:
+        merged.append(
+            _MergedQuery(
+                name=str(query.get("name") or "(unnamed)"),
+                operator="passthrough",
+                anchor=(),
+                alternatives=(),
+                originals=(query,),
+            )
+        )
+    return merged
+
+
+def _merged_query_string(entry: _MergedQuery, days: int) -> str:
+    """Build the arXiv ``search_query`` for one merged or passthrough entry."""
+    if entry.operator == "AND-OR":
+        anchor_part = " AND ".join(_term_clause(t) for t in entry.anchor)
+        alts_part = " OR ".join(_term_clause(t) for t in entry.alternatives)
+        return f"({anchor_part}) AND ({alts_part}) AND {_date_clause(days)}"
+    original = entry.originals[0]
+    return build_query(original["terms"], str(original.get("operator", "OR")), days)
+
+
+def _has_term(text: str, term: str) -> bool:
+    """Best-effort text match: literal or hyphen-stripped form in the text."""
+    needle = term.lower().strip()
+    return needle in text or needle.replace("-", " ") in text
+
+
+def _attribute_to_originals(
+    title: str, abstract: str, originals: tuple[dict[str, Any], ...]
+) -> list[str]:
+    """Best-effort: which of ``originals`` does this paper satisfy by text?"""
+    text = (title + " " + abstract).lower()
+    matched: list[str] = []
+    for orig in originals:
+        terms = orig.get("terms", [])
+        op = str(orig.get("operator", "OR")).upper()
+        if op == "AND":
+            satisfies = all(_has_term(text, t) for t in terms)
+        else:
+            satisfies = any(_has_term(text, t) for t in terms)
+        if satisfies:
+            matched.append(str(orig.get("name") or "(unnamed)"))
+    return matched
+
+
+def _matched_queries_for(entry: _MergedQuery, title: str, abstract: str) -> list[str]:
+    """Hybrid attribution for one paper: the merged group label always; plus
+    the original query names the paper's title+abstract satisfies. Passthrough
+    entries just carry their original name. The group label tells you exactly
+    what was sent to arXiv; the individual labels are text-inferred (so they
+    can under-report when arXiv matched on a field we don't store)."""
+    if entry.operator == "passthrough":
+        return [entry.name]
+    result = [entry.name]
+    for name in _attribute_to_originals(title, abstract, entry.originals):
+        if name not in result:
+            result.append(name)
+    return result
+
+
 def fetch(
     queries: list[dict[str, Any]],
     categories: list[str],
@@ -65,11 +207,16 @@ def fetch(
 ) -> list[Paper]:
     """Run every query, filter to the given categories, dedupe by arXiv id.
 
-    A paper that matches several queries is kept once but records every query
-    name that hit it in ``matched_queries``. A query that fails (HTTP 429,
-    transient parse error, ...) is reported via ``on_query_error`` and skipped;
-    the remaining queries still run. Only when *every* query fails does this
-    raise ``RuntimeError`` so the caller can stop early.
+    AND queries that share an (n-1)-term subset are smart-merged into a single
+    arXiv request (``anchor AND (alt1 OR alt2 ...)``), which trims request
+    count substantially without changing the union of results. Each paper's
+    ``matched_queries`` carries a hybrid attribution: the merged group label
+    (always, exact) plus any individual original-query names whose terms also
+    appear in the paper's title or abstract (best-effort).
+
+    A query that fails (HTTP 429, transient parse error, ...) is reported via
+    ``on_query_error`` and skipped; remaining queries still run. Only when
+    every request fails does this raise ``RuntimeError``.
     """
     # Defaults match arXiv's documented "no more than one request every three
     # seconds". Bigger spacing / more retries did not help in practice: once
@@ -80,9 +227,10 @@ def fetch(
     matches: dict[str, list[str]] = {}
     failed: list[str] = []
 
-    for query in queries:
-        query_name = str(query.get("name") or "(unnamed)")
-        query_string = build_query(query["terms"], query.get("operator", "OR"), days)
+    merged_entries = group_queries(queries)
+
+    for entry in merged_entries:
+        query_string = _merged_query_string(entry, days)
         search = arxiv.Search(
             query=query_string,
             max_results=max_results,
@@ -92,9 +240,9 @@ def fetch(
         try:
             results = list(client.results(search))
         except arxiv.ArxivError as error:
-            failed.append(query_name)
+            failed.append(entry.name)
             if on_query_error is not None:
-                on_query_error(query_name, str(error))
+                on_query_error(entry.name, str(error))
             continue
 
         for result in results:
@@ -102,25 +250,28 @@ def fetch(
             if category_set and not category_set.intersection(result_categories):
                 continue
             paper_id = result.get_short_id()
+            title = " ".join(result.title.split())
+            abstract = " ".join(result.summary.split())
             hits = matches.setdefault(paper_id, [])
-            if query_name not in hits:
-                hits.append(query_name)
+            for name in _matched_queries_for(entry, title, abstract):
+                if name not in hits:
+                    hits.append(name)
             if paper_id in rows:
                 continue
             rows[paper_id] = dict(
                 arxiv_id=paper_id,
-                title=" ".join(result.title.split()),
+                title=title,
                 authors=[author.name for author in result.authors],
-                abstract=" ".join(result.summary.split()),
+                abstract=abstract,
                 submitted=result.published.date().isoformat(),
                 categories=result_categories,
                 primary_category=result.primary_category,
                 url=result.entry_id,
             )
 
-    if failed and len(failed) == len(queries):
+    if failed and len(failed) == len(merged_entries):
         raise RuntimeError(
-            f"arXiv rejected every query ({len(failed)} of {len(queries)}); "
+            f"arXiv rejected every query ({len(failed)} of {len(merged_entries)}); "
             "likely a rate limit, try again in a few minutes"
         )
 
