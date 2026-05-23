@@ -111,7 +111,14 @@ def _run_one(project: str) -> None:
     project_config = config.load_config(project)
     days = config.recent_days()
     queries = project_config["queries"]
-    ui.step(f"{project}  fetching arXiv ({days}-day window, {len(queries)} queries)")
+    merged_count = len(fetch.group_queries(queries))
+    if merged_count < len(queries):
+        ui.step(
+            f"{project}  fetching arXiv ({days}-day window, "
+            f"{len(queries)} queries -> {merged_count} merged requests)"
+        )
+    else:
+        ui.step(f"{project}  fetching arXiv ({days}-day window, {len(queries)} queries)")
 
     def _warn_query(name: str, error: str) -> None:
         ui.substep(f"query '{name}' failed: {error.splitlines()[0]}")
