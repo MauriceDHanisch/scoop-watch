@@ -281,6 +281,31 @@ def test_fetch_raises_when_every_query_fails(monkeypatch):
         )
 
 
+def test_fetch_reports_progress_per_merged_request(monkeypatch):
+    """The progress callback fires once per merged request, in order, with
+    'idx/total' so the user sees fetch progress incrementally."""
+    _FakeClient.results_to_yield = [_FakeResult("2605.99999", ["cs.LG"])]
+    monkeypatch.setattr(fetch.arxiv, "Client", _FakeClient)
+    monkeypatch.setattr(fetch.arxiv, "Search", lambda **kwargs: None)
+    lines: list[str] = []
+
+    fetch.fetch(
+        [
+            {"name": "q1", "operator": "OR", "terms": ["x"]},
+            {"name": "q2", "operator": "OR", "terms": ["y"]},
+            {"name": "q3", "operator": "OR", "terms": ["z"]},
+        ],
+        categories=["cs.LG"],
+        days=7,
+        progress=lines.append,
+    )
+
+    assert len(lines) == 3
+    assert lines[0].startswith("[1/3]")
+    assert lines[1].startswith("[2/3]")
+    assert lines[2].startswith("[3/3]")
+
+
 def test_fetch_dedupes_and_filters_categories(monkeypatch):
     _FakeClient.results_to_yield = [
         _FakeResult("2605.00001", ["physics.chem-ph"]),

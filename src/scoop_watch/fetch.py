@@ -204,6 +204,7 @@ def fetch(
     days: int,
     max_results: int = 200,
     on_query_error: Callable[[str, str], None] | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> list[Paper]:
     """Run every query, filter to the given categories, dedupe by arXiv id.
 
@@ -228,8 +229,10 @@ def fetch(
     failed: list[str] = []
 
     merged_entries = group_queries(queries)
+    total = len(merged_entries)
+    report = progress or (lambda _message: None)
 
-    for entry in merged_entries:
+    for idx, entry in enumerate(merged_entries, start=1):
         query_string = _merged_query_string(entry, days)
         search = arxiv.Search(
             query=query_string,
@@ -245,6 +248,7 @@ def fetch(
                 on_query_error(entry.name, str(error))
             continue
 
+        rows_before = len(rows)
         for result in results:
             result_categories = list(result.categories)
             if category_set and not category_set.intersection(result_categories):
@@ -268,6 +272,11 @@ def fetch(
                 primary_category=result.primary_category,
                 url=result.entry_id,
             )
+        new_papers = len(rows) - rows_before
+        report(
+            f"[{idx}/{total}] {entry.name}: "
+            f"{len(results)} returned, {new_papers} new ({len(rows)} unique)"
+        )
 
     if failed and len(failed) == len(merged_entries):
         raise RuntimeError(

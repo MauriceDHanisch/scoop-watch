@@ -128,6 +128,7 @@ def _run_one(project: str) -> None:
         project_config.get("categories", []),
         days,
         on_query_error=_warn_query,
+        progress=ui.substep,
     )
 
     # Same-day reruns are kept as -v2 / -v3 / ... rather than overwriting.
