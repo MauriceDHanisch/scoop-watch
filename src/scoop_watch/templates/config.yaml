@@ -1,0 +1,28 @@
+# Scoop-watch project config (user-authored — edit freely, comments are kept).
+#
+# categories: arXiv categories the project belongs to. A paper is kept only if
+#   it lists at least one of these. Filtering is client-side, so a paper found
+#   by keyword is never dropped by arXiv's lagging category index.
+#
+# queries: each entry is a separate arXiv keyword search. `terms` are combined
+#   with `operator` (AND/OR). Multi-word terms are phrase-matched automatically.
+#
+# The schedule and the search window are global — set them with
+# `scoop-watch setup`, not here.
+
+categories:
+  - physics.chem-ph
+  - cs.LG
+
+queries:
+  - name: Core topic
+    operator: OR
+    terms:
+      - your main topic
+      - a synonym for it
+
+  - name: Method family
+    operator: AND
+    terms:
+      - your method
+      - a defining property

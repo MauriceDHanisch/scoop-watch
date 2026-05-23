@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "scoop-watch"
+version = "0.1.0"
+description = "Daily arXiv briefings that flag papers overlapping your active research project"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "arxiv>=2.1",
+    "pyyaml>=6.0",
+    "questionary>=2.0",
+]
+
+[project.scripts]
+scoop-watch = "scoop_watch.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pre-commit>=3.0",
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "ty",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/scoop_watch"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 90
+
+[tool.ty.environment]
+python-version = "3.10"

@@ -1,0 +1,163 @@
+"""Filesystem locations for the program and its user-facing data.
+
+The program lives in a hidden, installer-managed location. Everything the
+user reads or edits (project descriptions, briefings, secrets) lives under a
+visible data root, by default inside the XDG Documents directory.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import os
+import subprocess
+from importlib.resources import files
+from pathlib import Path
+
+DATA_DIRNAME = "scoop-watch"
+
+
+def _xdg_documents() -> Path | None:
+    """Resolve the localized Documents directory, or None if unavailable."""
+    try:
+        result = subprocess.run(
+            ["xdg-user-dir", "DOCUMENTS"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            candidate = Path(result.stdout.strip())
+            if str(candidate) and candidate != Path.home():
+                return candidate
+    except (FileNotFoundError, subprocess.SubprocessError):
+        pass
+    fallback = Path.home() / "Documents"
+    return fallback if fallback.is_dir() else None
+
+
+def default_data_root() -> Path:
+    """The data root before any user override or saved choice."""
+    base = _xdg_documents() or Path.home()
+    return base / DATA_DIRNAME
+
+
+def config_dir() -> Path:
+    """Hidden directory holding the data-root pointer (not user-facing)."""
+    return Path.home() / ".config" / "scoop-watch"
+
+
+def _datadir_pointer() -> Path:
+    return config_dir() / "datadir"
+
+
+def set_data_root(path: Path) -> None:
+    """Persist a custom data-root choice so later runs find it."""
+    config_dir().mkdir(parents=True, exist_ok=True)
+    _datadir_pointer().write_text(f"{path}\n", encoding="utf-8")
+
+
+def data_root() -> Path:
+    """Visible directory holding project descriptions, briefings and secrets.
+
+    Resolution order: WATCH_DATA_DIR env var, saved pointer file, default.
+    """
+    override = os.environ.get("WATCH_DATA_DIR")
+    if override:
+        return Path(override).expanduser()
+    pointer = _datadir_pointer()
+    if pointer.is_file():
+        stored = pointer.read_text(encoding="utf-8").strip()
+        if stored:
+            return Path(stored).expanduser()
+    return default_data_root()
+
+
+def project_dir(name: str) -> Path:
+    return data_root() / "projects" / name
+
+
+def archive_dir(name: str) -> Path:
+    return project_dir(name) / "archive"
+
+
+def fetch_archive_dir(name: str) -> Path:
+    """Per-project directory where raw arXiv fetch results are saved.
+
+    A copy of each day's fetched papers (the JSON list sent to the synthesis
+    agent) is written here for debugging and provenance.
+    """
+    return project_dir(name) / "fetch-archive"
+
+
+def read_json_path(name: str) -> Path:
+    """Per-project list of arXiv ids the user has marked as read.
+
+    Stored as JSON. The base arXiv id (version suffix removed) is the dedup
+    key, so a later revision of an already-read paper is filtered too.
+    """
+    return project_dir(name) / "read.json"
+
+
+def next_version_stem(name: str, today: dt.date | None = None) -> str:
+    """Today's filename stem, suffixed ``-v2`` / ``-v3`` / ... on rerun.
+
+    A run writes two files keyed by the same stem: ``archive/<stem>.md`` and
+    ``fetch-archive/<stem>.json``. If either is already on disk for today,
+    the next free ``-vN`` suffix is returned so a same-day rerun preserves
+    the earlier outputs instead of overwriting them.
+    """
+    date = (today or dt.date.today()).isoformat()
+    archive = archive_dir(name)
+    fetch_archive = fetch_archive_dir(name)
+
+    def used(stem: str) -> bool:
+        return (archive / f"{stem}.md").exists() or (
+            fetch_archive / f"{stem}.json"
+        ).exists()
+
+    if not used(date):
+        return date
+    version = 2
+    while used(f"{date}-v{version}"):
+        version += 1
+    return f"{date}-v{version}"
+
+
+def config_path(name: str) -> Path:
+    """User-authored project config: arXiv categories and keyword queries."""
+    return project_dir(name) / "config.yaml"
+
+
+def layout_path(name: str) -> Path:
+    return project_dir(name) / "layout.md"
+
+
+def description_path(name: str) -> Path:
+    return project_dir(name) / "project.md"
+
+
+def env_file() -> Path:
+    return data_root() / ".env"
+
+
+def systemd_user_dir() -> Path:
+    return Path.home() / ".config" / "systemd" / "user"
+
+
+def shim_path() -> Path:
+    return Path.home() / ".local" / "bin" / "scoop-watch"
+
+
+def app_install_dir() -> Path:
+    """Where the installer places the program (used by `scoop-watch update`)."""
+    return Path.home() / ".local" / "share" / "scoop-watch"
+
+
+def package_text(filename: str) -> str:
+    """Read a text resource shipped inside the package."""
+    return (files("scoop_watch") / filename).read_text(encoding="utf-8")
+
+
+def template_dir() -> Path:
+    """Directory of per-project template files (config.yaml, layout.md, ...)."""
+    return Path(str(files("scoop_watch") / "templates"))
