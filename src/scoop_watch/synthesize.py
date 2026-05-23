@@ -218,6 +218,9 @@ def synthesize(
             f"the last {window_days} days, but more than 7 days ago",
         ),
     ]
+    # Only non-empty tiers reach the agent; empty tiers render a static
+    # placeholder so their heading is still visible in the briefing (a
+    # disappearing tier reads as "did it crash?" rather than "nothing new").
     passes: list[tuple[str, list[Paper], str]] = [
         (heading, tier_papers, scope)
         for heading, tier_papers, scope in tier_definitions
@@ -228,13 +231,17 @@ def synthesize(
 
     today = dt.date.today().isoformat()
     sections = [f"# 🔬 Scoop-watch Briefing — {today}"]
-    if not passes:
+    if not any(tier_papers for _h, tier_papers, _s in tier_definitions):
         sections.append("Nothing notable: no papers in the fetch window.")
     else:
         # Wrap collapsibles per tier so a tier separator never gets swept
         # into the previous tier's <details> body.
-        for heading, _papers, _scope in passes:
-            sections.append(_wrap_collapsible(f"# {heading}\n\n{bodies[heading]}"))
+        for heading, tier_papers, _scope in tier_definitions:
+            if tier_papers:
+                body = bodies[heading]
+            else:
+                body = "_No new papers in this window._"
+            sections.append(_wrap_collapsible(f"# {heading}\n\n{body}"))
 
     if read_papers:
         sections.append(_already_read_block(read_papers))

@@ -112,15 +112,20 @@ def test_synthesize_runs_one_pass_per_nonempty_tier(monkeypatch, tmp_path):
 
 
 def test_synthesize_single_pass_when_only_recent(monkeypatch, tmp_path):
+    """Only one agent call when papers land in a single tier, but every tier
+    heading still renders so an empty window reads as 'nothing new' rather
+    than 'did synthesis crash?'."""
     prompts = _stub_project(monkeypatch, tmp_path)
 
     out = synthesize.synthesize("demo", [_paper(40, 1), _paper(60, 2)], agent="claude")
     text = out.read_text(encoding="utf-8")
 
     assert len(prompts) == 1
+    # All three tier headings present; the two empty ones carry a placeholder.
+    assert "⚡ Last 24 hours" in text
+    assert "📅 Last 7 days" in text
     assert "🗂️ Last 90 days" in text
-    assert "⚡ Last 24 hours" not in text
-    assert "📅 Last 7 days" not in text
+    assert text.count("_No new papers in this window._") == 2
 
 
 def test_wrap_collapsible_wraps_helpful_and_broader_with_counts():
