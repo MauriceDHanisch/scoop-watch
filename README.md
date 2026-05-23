@@ -143,7 +143,8 @@ cannot quietly outlive your attention.
 The schedule (weekdays and time) and the search window are **global** — one
 setting for every project, chosen during `scoop-watch setup` and stored in the
 data-root `.env`. `arm` just applies it to a project; it does not ask again.
-Change them with `scoop-watch setup --reconfigure`.
+Re-run `scoop-watch setup` any time to change them; every prompt shows the
+current value as the default, so press Enter to keep or type to override.
 
 No `sudo`. Check state with `scoop-watch status` or `systemctl --user
 list-timers`. A missed day is not lost: every run refetches the whole search

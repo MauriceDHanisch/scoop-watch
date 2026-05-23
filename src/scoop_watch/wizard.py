@@ -109,6 +109,25 @@ def setup_defaults() -> SetupChoices:
     )
 
 
+def current_choices() -> SetupChoices:
+    """Snapshot the current persisted settings as a SetupChoices.
+
+    Used as the starting point for `scoop-watch setup` re-runs: every prompt
+    shows the existing value as its default, so pressing Enter keeps it and
+    typing a new value overrides it. Falls back to ``setup_defaults()`` for
+    any field that has never been set.
+    """
+    defaults = setup_defaults()
+    return SetupChoices(
+        agent=config.agent() or defaults.agent,
+        model=config.model() or "",
+        data_dir=paths.data_root(),
+        run_time=config.default_run_time() or defaults.run_time,
+        weekdays=list(config.default_weekdays()) or defaults.weekdays,
+        recent_days=config.recent_days() or defaults.recent_days,
+    )
+
+
 def _pick_model(agent: str) -> str:
     """Choose a model from a per-agent list, validating it against the CLI."""
     curated = config.MODEL_CHOICES.get(agent, [])
@@ -208,10 +227,19 @@ def pick_project_name() -> str | None:
     return name.strip() if name else None
 
 
-def resolve_setup(use_defaults: bool) -> SetupChoices:
-    """Prompt for global settings, or return defaults when non-interactive."""
+def resolve_setup(
+    use_defaults: bool, current: SetupChoices | None = None
+) -> SetupChoices:
+    """Prompt for global settings, or return defaults when non-interactive.
+
+    ``current``, if given, seeds every prompt with the existing value so the
+    user can press Enter to keep it. ``use_defaults`` short-circuits prompting
+    (CI / first-time non-interactive setup).
+    """
     if use_defaults or not interactive():
-        return setup_defaults()
+        return current or setup_defaults()
+
+    starting = current or setup_defaults()
 
     agent = str(
         _select(
@@ -223,23 +251,25 @@ def resolve_setup(use_defaults: bool) -> SetupChoices:
                 )
                 for name in config.SUPPORTED_AGENTS
             ],
-            default=config.detect_agent(),
+            default=starting.agent,
         )
     )
+    # Re-prompting the model also re-validates it; keeping the current one is
+    # a deliberate choice (Enter through the menu picks "(agent default)").
     model = _pick_model(agent)
-    data_dir = _text("Data directory:", default=str(paths.default_data_root()))
-    run_time = _text("Daily run time (HH:MM):", default=config.DEFAULT_TIME)
-    weekdays = pick_weekdays(list(config.DEFAULT_WEEKDAYS))
+    data_dir = _text("Data directory:", default=str(starting.data_dir))
+    run_time = _text("Daily run time (HH:MM):", default=starting.run_time)
+    weekdays = pick_weekdays(starting.weekdays)
     recent_days = _int_text(
         "How many days back should each briefing search?",
-        config.DEFAULT_RECENT_DAYS,
+        starting.recent_days,
     )
 
     return SetupChoices(
         agent=agent,
         model=model,
         data_dir=Path(data_dir).expanduser(),
-        run_time=run_time or config.DEFAULT_TIME,
+        run_time=run_time or starting.run_time,
         weekdays=weekdays,
         recent_days=recent_days,
     )

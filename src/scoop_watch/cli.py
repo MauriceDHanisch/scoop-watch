@@ -34,22 +34,20 @@ def _show_tip(command: str) -> None:
 
 
 def cmd_setup(args: argparse.Namespace) -> int:
-    """Configure global settings (agent, model, schedule, data directory)."""
-    if paths.env_file().is_file() and not args.reconfigure:
-        ui.ok("scoop-watch is already configured")
-        ui.detail("data root", str(paths.data_root()))
-        ui.detail("agent", config.agent())
-        ui.detail("model", config.model() or "agent default")
-        ui.detail(
-            "schedule",
-            f"{','.join(config.default_weekdays())} at {config.default_run_time()}",
-        )
-        ui.detail("search window", f"{config.recent_days()} days")
-        ui.blank()
-        _show_tip("setup")
-        return 0
+    """Configure global settings (agent, model, schedule, data directory).
 
-    choices = wizard.resolve_setup(args.defaults)
+    Re-running setup re-prompts every field with the current persisted value
+    as its default, so Enter keeps and typing overrides. The ``--reconfigure``
+    flag is accepted for backward compatibility but no longer needed.
+    """
+    has_env = paths.env_file().is_file()
+    if has_env:
+        ui.step("re-running setup; press Enter to keep each current value")
+        current = wizard.current_choices()
+    else:
+        current = None
+
+    choices = wizard.resolve_setup(args.defaults, current=current)
     if choices.data_dir != paths.default_data_root():
         paths.set_data_root(choices.data_dir)
 
@@ -477,7 +475,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--defaults", action="store_true", help="skip prompts, accept defaults"
     )
     setup_parser.add_argument(
-        "--reconfigure", action="store_true", help="re-run setup even if configured"
+        "--reconfigure",
+        action="store_true",
+        help="deprecated; `setup` now always re-prompts with current values",
     )
 
     new_parser = sub.add_parser("new", help="scaffold a project from templates")
