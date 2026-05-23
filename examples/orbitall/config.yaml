@@ -1,0 +1,60 @@
+# Scoop-watch config for the OrbitAll example project.
+# Based on the paper arXiv:2507.03853 (https://arxiv.org/abs/2507.03853).
+#
+# Keyword search runs against arXiv text fields (title/abstract/all), which
+# index same-day. Categories below filter the results client-side.
+
+categories:
+  - cs.LG
+  - physics.chem-ph
+  - physics.comp-ph
+  - cond-mat.mtrl-sci
+
+queries:
+  - name: ML molecular property prediction
+    operator: AND
+    terms:
+      - machine learning
+      - molecular property prediction
+
+  - name: Open-shell / radical molecules + ML
+    operator: AND
+    terms:
+      - open-shell
+      - machine learning
+
+  - name: Charged molecules / molecular ions + ML
+    operator: AND
+    terms:
+      - molecular ions
+      - neural network
+
+  - name: Equivariant graph network for molecules
+    operator: AND
+    terms:
+      - equivariant
+      - graph neural network
+
+  - name: Orbital features as model input
+    operator: AND
+    terms:
+      - orbital features
+      - neural network
+
+  - name: Delta-learning quantum chemistry
+    operator: OR
+    terms:
+      - delta-learning
+      - semi-empirical correction
+
+  - name: Spin-resolved molecular representation
+    operator: AND
+    terms:
+      - spin
+      - molecular representation
+
+  - name: Data-efficient quantum chemistry ML
+    operator: AND
+    terms:
+      - data-efficient
+      - quantum chemistry
