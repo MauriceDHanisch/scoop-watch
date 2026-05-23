@@ -28,7 +28,13 @@ printf '\n%sscoop-watch%s %sinstaller%s\n' "$B" "$X" "$D" "$X"
 printf '%s───────────────────────%s\n\n' "$D" "$X"
 
 # 1. Platform checks.
-[ "$(uname -s)" = "Linux" ] || die "scoop-watch supports Linux only (the scheduler uses systemd)."
+UNAME="$(uname -s)"
+case "$UNAME" in
+    Linux)  PLATFORM="linux"  ; SCHEDULER="systemd user timers" ;;
+    Darwin) PLATFORM="macos"  ; SCHEDULER="launchd LaunchAgents" ;;
+    *)      die "scoop-watch supports Linux and macOS only (got: $UNAME)" ;;
+esac
+ok "platform: $PLATFORM (scheduler: $SCHEDULER)"
 for tool in curl tar; do
     command -v "$tool" >/dev/null 2>&1 || die "required tool not found: $tool"
 done
@@ -87,13 +93,16 @@ EOF
 chmod +x "$SHIM"
 ok "command installed: $SHIM"
 
-# 6. First-time setup (interactive when a terminal is attached).
-printf '\n'
-step "Setup"
-if [ -e /dev/tty ]; then
-    "$SHIM" setup < /dev/tty
-else
-    "$SHIM" setup --defaults
+# 6. First-time setup.
+#
+# The installer used to auto-launch `scoop-watch setup < /dev/tty`, which works
+# on Linux but breaks on macOS: prompt_toolkit's kqueue selector rejects the
+# redirected stdin fd with EINVAL. Skipping the auto-launch removes the
+# TTY-reattach hack and matches what most CLI installers do — the user runs
+# setup themselves once the command is on PATH.
+needs_setup=true
+if [ -f "$HOME/Documents/scoop-watch/.env" ] || [ -f "$HOME/scoop-watch/.env" ]; then
+    needs_setup=false
 fi
 
 printf '\n%s%s✓%s %sscoop-watch %s%s\n\n' "$B" "$G" "$X" "$B" "$final_word" "$X"
@@ -108,6 +117,9 @@ if ! printf '%s' ":$PATH:" | grep -q ":$BIN_DIR:"; then
 fi
 
 printf '%sNext%s\n' "$B" "$X"
+if [ "$needs_setup" = "true" ]; then
+    printf '  %sscoop-watch setup%s    configure agent, model, schedule, search window\n' "$C" "$X"
+fi
 printf '  %sscoop-watch author%s   create your first project (start here)\n' "$C" "$X"
 printf '  %sscoop-watch run%s      generate a briefing\n' "$C" "$X"
 printf '  %sscoop-watch arm%s      schedule it (stops at reboot)\n' "$C" "$X"

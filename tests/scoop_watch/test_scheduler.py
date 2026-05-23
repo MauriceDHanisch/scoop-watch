@@ -1,6 +1,11 @@
-"""Tests for systemd unit construction (no systemd calls)."""
+"""Tests for systemd unit construction (no systemd calls).
 
-from scoop_watch import config, scheduler
+macOS launchd backend tests live in ``test_scheduler_macos.py``; the
+front-end dispatcher in ``scheduler.py`` is a one-liner per call so its
+behavior is covered through each backend's tests.
+"""
+
+from scoop_watch import config, scheduler_linux as scheduler
 
 
 def test_unit_stem_namespaced():

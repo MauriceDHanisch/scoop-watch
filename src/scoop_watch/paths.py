@@ -151,7 +151,14 @@ def env_file() -> Path:
 
 
 def systemd_user_dir() -> Path:
+    """Linux systemd user-unit directory (one of the user-search-paths)."""
     return Path.home() / ".config" / "systemd" / "user"
+
+
+def launchd_agent_dir() -> Path:
+    """macOS LaunchAgents directory. Plists are written here for visibility,
+    then bootstrapped into the user GUI session for reboot-ephemeral runs."""
+    return Path.home() / "Library" / "LaunchAgents"
 
 
 def shim_path() -> Path:

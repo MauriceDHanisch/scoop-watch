@@ -24,7 +24,7 @@ recency tiers so the time-critical reading is obvious:
 - 🗂️ **Last N days** — the rest of the configured search window
 
 Built for researchers who want to stay current without skimming hundreds of
-abstracts a week. Linux only.
+abstracts a week. Linux and macOS supported.
 
 ---
 
@@ -46,7 +46,7 @@ Three stages, kept separate on purpose:
 
 ## Install
 
-Linux only (the scheduler uses systemd user timers).
+Linux (systemd user timers) or macOS (launchd LaunchAgents).
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MauriceDHanisch/scoop-watch/main/install.sh | bash
@@ -135,10 +135,11 @@ precise description is what makes the briefings precise.
 
 ## Scheduling — deliberate, not forgotten
 
-`scoop-watch arm` installs a systemd user timer that is **started but never
-enabled**. It runs on the schedule for as long as the machine stays up, and a
-reboot stops it. Resuming is a deliberate `scoop-watch arm`. The automation
-cannot quietly outlive your attention.
+`scoop-watch arm` installs a per-session timer: a systemd user timer on Linux
+(**started but never enabled**) or a launchd LaunchAgent bootstrapped into the
+GUI session on macOS. It runs on the schedule for as long as the user session
+stays up, and a reboot stops it. Resuming is a deliberate `scoop-watch arm`.
+The automation cannot quietly outlive your attention.
 
 The schedule (weekdays and time) and the search window are **global** — one
 setting for every project, chosen during `scoop-watch setup` and stored in the
@@ -146,8 +147,9 @@ data-root `.env`. `arm` just applies it to a project; it does not ask again.
 Re-run `scoop-watch setup` any time to change them; every prompt shows the
 current value as the default, so press Enter to keep or type to override.
 
-No `sudo`. Check state with `scoop-watch status` or `systemctl --user
-list-timers`. A missed day is not lost: every run refetches the whole search
+No `sudo`. Check state with `scoop-watch status`, or `systemctl --user
+list-timers` on Linux / `launchctl print gui/$UID/com.scoop-watch.<project>`
+on macOS. A missed day is not lost: every run refetches the whole search
 window (90 days by default), so skipped papers resurface under "Last 7 days".
 
 ---
