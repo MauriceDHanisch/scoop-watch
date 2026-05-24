@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -52,6 +54,243 @@ def _batch_prompt(project: str, batch: list[Paper], batch_idx: int, total: int) 
         f"# Project description\n{config.project_description(project)}\n\n"
         f"# Papers (JSON)\n{json.dumps(papers_as_dicts(batch), indent=2)}\n"
     )
+
+
+_CONFIRMED = "🚨 Confirmed Scoop"
+_POTENTIAL = "⚠️ Potential Scoop"
+_SECTION_ORDER = (_CONFIRMED, _POTENTIAL)
+_NO_THEME = ""  # bucket for entries the batch placed under a section without `###`
+
+
+@dataclass(frozen=True)
+class _Entry:
+    """One paper entry parsed out of a batch output, kept as the verbatim
+    markdown block plus its (YYYY-MM) date for sorting."""
+
+    date: str  # YYYY-MM; entries with a missing/bad date sort last
+    text: str  # the full entry block ending right before the closing `---`
+
+
+@dataclass
+class _ParsedBatch:
+    """All entries from one batch, bucketed (section, theme) -> entries."""
+
+    by_section_theme: dict[tuple[str, str], list[_Entry]] = field(default_factory=dict)
+
+
+_SECTION_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
+_THEME_RE = re.compile(r"^###\s+(.+?)\s*$", re.MULTILINE)
+# Author line: "<names> · [arxiv:<id>](<url>) · YYYY-MM"
+_DATE_IN_AUTHOR_RE = re.compile(r"·\s*(\d{4}-\d{2})\s*$", re.MULTILINE)
+
+
+def _project_theme_order(project: str) -> list[str]:
+    """Theme names declared as ``## Theme: <name>`` in the project description.
+
+    Used to order themes inside each section of the merged survey. Themes that
+    a batch invents but the project does not declare go after these,
+    alphabetically — see ``_merge_themes_in_order``. A missing project.md
+    (test fixtures, freshly scaffolded projects) returns an empty list and
+    falls back to all-alphabetical ordering downstream.
+    """
+    try:
+        text = config.project_description(project)
+    except FileNotFoundError:
+        return []
+    return re.findall(r"^##\s+Theme:\s*(.+?)\s*$", text, re.MULTILINE)
+
+
+def _split_into_sections(body: str) -> dict[str, str]:
+    """Split a batch output into ``{section heading: section body}``.
+
+    Anything before the first recognised section heading is discarded; the
+    batch prompt forbids preamble, so this only protects against the agent
+    emitting boilerplate the prompt told it not to.
+    """
+    sections: dict[str, str] = {}
+    matches = list(_SECTION_RE.finditer(body))
+    for idx, match in enumerate(matches):
+        heading = match.group(1).strip()
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(body)
+        sections[heading] = body[start:end].strip()
+    return sections
+
+
+def _split_section_into_themes(section_body: str) -> dict[str, str]:
+    """Split a section body into ``{theme name: theme body}``.
+
+    A section without any `###` heading means the project declared no themes;
+    the entire body goes under the empty-string key (``_NO_THEME``).
+    """
+    themes: dict[str, str] = {}
+    matches = list(_THEME_RE.finditer(section_body))
+    if not matches:
+        if section_body.strip():
+            themes[_NO_THEME] = section_body.strip()
+        return themes
+    # Anything before the first `###` is implicit-no-theme leading content;
+    # capture it so a malformed batch does not silently drop entries.
+    leading = section_body[: matches[0].start()].strip()
+    if leading:
+        themes[_NO_THEME] = leading
+    for idx, match in enumerate(matches):
+        name = match.group(1).strip()
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(section_body)
+        body = section_body[start:end].strip()
+        # Same theme appearing twice in one batch (unusual): concatenate.
+        if name in themes:
+            themes[name] = themes[name] + "\n\n" + body
+        else:
+            themes[name] = body
+    return themes
+
+
+def _split_theme_into_entries(theme_body: str) -> list[_Entry]:
+    """Split a theme body on the closing ``---`` rule between entries.
+
+    Each entry's verbatim text is preserved (minus any leading/trailing
+    whitespace). The YYYY-MM date is extracted from the author line for
+    sorting; entries without a parseable date get the empty string, which
+    sorts them after dated entries.
+    """
+    chunks = re.split(r"^\s*---\s*$", theme_body, flags=re.MULTILINE)
+    entries: list[_Entry] = []
+    for chunk in chunks:
+        text = chunk.strip()
+        if not text:
+            continue
+        # Heuristic to drop batches that wrote prose like "no scoops" instead of
+        # entries: a real entry starts with a bold title.
+        if not text.startswith("**"):
+            continue
+        date_match = _DATE_IN_AUTHOR_RE.search(text)
+        date = date_match.group(1) if date_match else ""
+        entries.append(_Entry(date=date, text=text))
+    return entries
+
+
+def _parse_batch(body: str) -> _ParsedBatch:
+    """Walk a batch output and bucket its entries by (section, theme)."""
+    parsed = _ParsedBatch()
+    sections = _split_into_sections(body)
+    for section_name in _SECTION_ORDER:
+        section_body = sections.get(section_name, "").strip()
+        if not section_body:
+            continue
+        for theme_name, theme_body in _split_section_into_themes(section_body).items():
+            entries = _split_theme_into_entries(theme_body)
+            if not entries:
+                continue
+            parsed.by_section_theme.setdefault((section_name, theme_name), []).extend(
+                entries
+            )
+    return parsed
+
+
+def _merge_themes_in_order(
+    section_buckets: dict[str, list[_Entry]], declared_order: list[str]
+) -> list[tuple[str, list[_Entry]]]:
+    """Return ``[(theme, entries)]`` in declared-order, undeclared at the end."""
+    declared_set = set(declared_order)
+    ordered: list[tuple[str, list[_Entry]]] = []
+    # Declared themes (project.md order), only if they have entries.
+    for theme in declared_order:
+        if theme in section_buckets and section_buckets[theme]:
+            ordered.append((theme, section_buckets[theme]))
+    # Themes a batch invented that the project did not declare: alphabetical.
+    extras = sorted(
+        name
+        for name in section_buckets
+        if name not in declared_set and section_buckets[name]
+    )
+    for theme in extras:
+        ordered.append((theme, section_buckets[theme]))
+    return ordered
+
+
+def _render_theme(theme: str, entries: list[_Entry]) -> str:
+    """Wrap one theme's entries in a `<details>` block with a paper count.
+
+    Entries are emitted in the order received (caller sorts beforehand). Each
+    entry's text is followed by the standalone ``---`` rule the format
+    contract requires.
+    """
+    plural = "paper" if len(entries) == 1 else "papers"
+    label = f"<strong>{theme}</strong> ({len(entries)} {plural})"
+    # If there is no theme name, render the entries directly (no `<details>`
+    # wrap) — the project declared no themes and a collapsible with an empty
+    # label would read strangely.
+    bodies = "\n\n---\n\n".join(entry.text for entry in entries) + "\n\n---\n"
+    if not theme:
+        return bodies
+    return f"<details>\n<summary>{label}</summary>\n\n{bodies}\n</details>"
+
+
+def _programmatic_merge(
+    project: str,
+    bodies: list[str],
+    years: int,
+    start_date: str,
+    end_date: str,
+    total_papers: int,
+) -> str:
+    """Combine batch outputs into the final survey, deterministically.
+
+    Replaces what was an 8-minute LLM merge call with a parser. The per-batch
+    synthesis (where the analytical work happens) is unchanged; this function
+    only sorts, groups, counts and wraps the entries those batches produced.
+    Entries are kept verbatim — never paraphrased — so no analytical content
+    is at risk.
+    """
+    # Bucket all entries from all batches by (section, theme).
+    buckets: dict[str, dict[str, list[_Entry]]] = {
+        section: {} for section in _SECTION_ORDER
+    }
+    for body in bodies:
+        for (section, theme), entries in _parse_batch(body).by_section_theme.items():
+            buckets[section].setdefault(theme, []).extend(entries)
+
+    # Sort each (section, theme) by date descending (newest first). The empty
+    # string from a missing date sorts last because '' < any real YYYY-MM.
+    for section_buckets in buckets.values():
+        for theme in section_buckets:
+            section_buckets[theme].sort(key=lambda entry: entry.date or "", reverse=True)
+
+    declared_themes = _project_theme_order(project)
+    confirmed_total = sum(len(v) for v in buckets[_CONFIRMED].values())
+    potential_total = sum(len(v) for v in buckets[_POTENTIAL].values())
+    surfaced = confirmed_total + potential_total
+    non_overlapping = max(total_papers - surfaced, 0)
+
+    parts: list[str] = []
+    parts.append(f"# 🔬 Scoop-watch Deep Survey — {project}")
+    parts.append(
+        f"*{years}-year window: {start_date} → {end_date} · "
+        f"{total_papers} papers scanned · {surfaced} surfaced*"
+    )
+    parts.append("")
+    parts.append("## Summary")
+    parts.append(f"- {confirmed_total} confirmed scoops requiring response")
+    parts.append(f"- {potential_total} potential scoops worth monitoring")
+    parts.append(f"- {non_overlapping} papers reviewed and judged non-overlapping")
+    parts.append("")
+    parts.append("---")
+    parts.append("")
+
+    section_titles = {
+        _CONFIRMED: f"## {_CONFIRMED} ({confirmed_total})",
+        _POTENTIAL: f"## {_POTENTIAL} ({potential_total})",
+    }
+    for section in _SECTION_ORDER:
+        parts.append(section_titles[section])
+        parts.append("")
+        themes = _merge_themes_in_order(buckets[section], declared_themes)
+        for theme, entries in themes:
+            parts.append(_render_theme(theme, entries))
+            parts.append("")
+    return "\n".join(parts).rstrip() + "\n"
 
 
 def _merge_prompt(
@@ -167,22 +406,21 @@ def synthesize_deep(
                 report(f"batch {idx + 1}/{total}: done")
 
     # Merge pass. The bodies list is now fully populated (either from disk or
-    # from the executor above).
+    # from the executor above). The merge is deterministic and runs in Python:
+    # the per-batch synthesis (where the analytical work happens) is the only
+    # place an LLM is needed; sorting, grouping, counting and `<details>`
+    # wrapping are mechanical work the old LLM merge wasted ~8 minutes on.
     assert all(body is not None for body in bodies), "every batch must have a body"
     end = dt.date.fromisoformat(date)
     start = end - dt.timedelta(days=years * 365)
     report(f"merging {total} batch output(s) into the final survey...")
-    merged = _run_agent(
-        agent,
-        model,
-        _merge_prompt(
-            project,
-            [body for body in bodies if body is not None],
-            years,
-            start.isoformat(),
-            end.isoformat(),
-            len(papers),
-        ),
+    merged = _programmatic_merge(
+        project,
+        [body for body in bodies if body is not None],
+        years=years,
+        start_date=start.isoformat(),
+        end_date=end.isoformat(),
+        total_papers=len(papers),
     )
 
     archive = paths.deep_archive_dir(project)

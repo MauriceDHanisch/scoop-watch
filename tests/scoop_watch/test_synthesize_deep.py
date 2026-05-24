@@ -32,10 +32,11 @@ def _stub_project_and_agent(monkeypatch, tmp_path):
     captured: list[str] = []
 
     def fake_agent(agent, model, prompt):
+        """Return a well-formed (but empty) batch body so the programmatic
+        merger has something parseable to work with. The merger is exercised
+        end-to-end here; its own behaviour is tested in test_merge_deep.py."""
         captured.append(prompt)
-        # The merge prompt embeds 'Batch outputs to merge'; tell merge from batch.
-        is_merge = "# Batch outputs to merge" in prompt
-        return "MERGED OUTPUT" if is_merge else f"BATCH OUTPUT #{len(captured)}"
+        return "## 🚨 Confirmed Scoop\n\n## ⚠️ Potential Scoop\n"
 
     monkeypatch.setattr(synthesize_deep, "_run_agent", fake_agent)
     return captured
@@ -55,7 +56,11 @@ def test_batch_size_larger_than_corpus_yields_one_batch():
     assert len(synthesize_deep._batch(papers, 100)) == 1
 
 
-def test_synthesize_deep_runs_one_call_per_batch_plus_merge(monkeypatch, tmp_path):
+def test_synthesize_deep_runs_one_agent_call_per_batch_no_merge_call(
+    monkeypatch, tmp_path
+):
+    """The merge is now deterministic Python — only the per-batch synthesis
+    fires the agent. 3 batches → 3 calls, not 4."""
     captured = _stub_project_and_agent(monkeypatch, tmp_path)
     papers = [_paper(i) for i in range(250)]  # 3 batches at size 100
 
@@ -69,16 +74,14 @@ def test_synthesize_deep_runs_one_call_per_batch_plus_merge(monkeypatch, tmp_pat
         max_workers=2,
     )
 
-    # 3 batch calls + 1 merge call.
-    assert len(captured) == 4
-    # Merge prompt embeds the date window and total count.
-    merge_prompt = next(p for p in captured if "# Batch outputs to merge" in p)
-    assert "total_papers: 250" in merge_prompt
-    assert "years: 5" in merge_prompt
-    assert "2026-05-23" in merge_prompt
-    # Final survey lands in deep-archive with the years suffix.
+    assert len(captured) == 3, "no LLM merge call any more — only per-batch"
     assert out.name == "2026-05-23_5y.md"
-    assert out.read_text(encoding="utf-8") == "MERGED OUTPUT"
+    # The final survey is emitted by the programmatic merger and has its
+    # header even when the (stubbed) batches produced no entries.
+    text = out.read_text(encoding="utf-8")
+    assert text.startswith("# 🔬 Scoop-watch Deep Survey — demo")
+    assert "5-year window" in text
+    assert "250 papers scanned" in text
 
 
 def test_synthesize_deep_writes_per_batch_checkpoint(monkeypatch, tmp_path):
@@ -109,10 +112,22 @@ def test_synthesize_deep_resume_skips_existing_batch_files(monkeypatch, tmp_path
     captured = _stub_project_and_agent(monkeypatch, tmp_path)
     papers = [_paper(i) for i in range(150)]  # 2 batches
 
-    # Pre-populate batch_00.md as if a previous run finished it.
+    # Pre-populate batch_00.md as if a previous run finished it. The body
+    # is in the per-batch format so the merger surfaces its entries verbatim
+    # — a distinctive phrase lets us assert the cached content reached the
+    # final survey without an extra agent call.
     batches_dir = tmp_path / "projects" / "demo" / "deep" / "batches" / "2026-05-23"
     batches_dir.mkdir(parents=True, exist_ok=True)
-    (batches_dir / "batch_00.md").write_text("CACHED BATCH 0", encoding="utf-8")
+    (batches_dir / "batch_00.md").write_text(
+        "## 🚨 Confirmed Scoop\n\n### CachedTheme\n\n"
+        "**Cached Paper Title**\n"
+        "Some Author · [arxiv:00.00](http://x) · 2025-03\n\n"
+        "Analysis with CACHED-BATCH-MARKER-PHRASE inside.\n"
+        "**A bolded distinction line.**\n\n"
+        "---\n\n"
+        "## ⚠️ Potential Scoop\n",
+        encoding="utf-8",
+    )
 
     synthesize_deep.synthesize_deep(
         "demo",
@@ -124,40 +139,26 @@ def test_synthesize_deep_resume_skips_existing_batch_files(monkeypatch, tmp_path
         max_workers=2,
     )
 
-    # Only batch_01 should have been fired, plus the merge — so 2 captures.
-    assert len(captured) == 2
-    merge_prompt = next(p for p in captured if "# Batch outputs to merge" in p)
-    # The cached batch_00 body must reach the merge.
-    assert "CACHED BATCH 0" in merge_prompt
-
-
-def test_merge_prompt_requires_date_sort_and_collapsible_themes():
-    """Regression: the merge prompt must tell the agent (1) sort by submission
-    date newest first within each theme, no relevance re-ranking, and (2)
-    wrap every theme in a <details> block with its paper count. These two
-    requirements together let the reader skim by theme and drill into
-    chronologically-sorted entries on demand."""
-    from scoop_watch import paths
-
-    text = paths.package_text("synthesis_deep_merge.md")
-    assert "Sort by submission date, newest first" in text
-    assert "<details>" in text
-    assert "<summary><strong>" in text
-    # Both singular and plural forms must be documented for the agent.
-    assert "N papers" in text
-    assert "1 paper" in text
+    # Only batch_01 should have been fired (the merge is now in-process).
+    assert len(captured) == 1
+    # The cached batch_00 body must reach the final survey verbatim.
+    out_path = tmp_path / "projects" / "demo" / "deep" / "archive" / "2026-05-23_5y.md"
+    assert "CACHED-BATCH-MARKER-PHRASE" in out_path.read_text(encoding="utf-8")
 
 
 def test_synthesize_deep_with_force_rebuild_uses_caller_cleanup(monkeypatch, tmp_path):
     """synthesize_deep itself does not implement --force; the CLI is
     responsible for wiping outputs before re-invoking. This test pins the
-    contract: if batch files exist, they are reused."""
+    contract: if batch files exist, they are reused (no agent calls at all
+    since the merge is now in-process)."""
     captured = _stub_project_and_agent(monkeypatch, tmp_path)
     papers = [_paper(i) for i in range(50)]  # 1 batch
 
     batches_dir = tmp_path / "projects" / "demo" / "deep" / "batches" / "2026-05-23"
     batches_dir.mkdir(parents=True, exist_ok=True)
-    (batches_dir / "batch_00.md").write_text("STALE", encoding="utf-8")
+    (batches_dir / "batch_00.md").write_text(
+        "## 🚨 Confirmed Scoop\n\n## ⚠️ Potential Scoop\n", encoding="utf-8"
+    )
 
     synthesize_deep.synthesize_deep(
         "demo",
@@ -169,6 +170,6 @@ def test_synthesize_deep_with_force_rebuild_uses_caller_cleanup(monkeypatch, tmp
         max_workers=1,
     )
 
-    # No fresh batch call; only the merge ran.
-    assert len(captured) == 1
-    assert "# Batch outputs to merge" in captured[0]
+    # No agent calls at all: the cached batch is reused and the merge is
+    # programmatic.
+    assert captured == []
