@@ -44,11 +44,16 @@ The structural elements the parser keys on:
    ```
 
    The separators are middle-dot `·` (U+00B7) with one space on each side.
-   Not `|`, not `•`, not en-dash. The date is `YYYY-MM` (e.g. `2025-09`)
-   and it must be the last thing on the line — no trailing parenthesis,
+   Not `|`, not `•`, not en-dash. The date is `YYYY-MM` where YYYY is the
+   **four-digit calendar year of the paper's submission date** (e.g.
+   `2025-09` for September 2025). Do **not** use the arxiv id prefix —
+   `arxiv:2509.12345` is the September 2025 prefix, but the date is
+   `2025-09`, never `2509-XX`. Get this wrong and the entry sorts into
+   an `Undated` bucket because the parser rejects implausible years.
+
+   The date must be the last thing on the line — no trailing parenthesis,
    no trailing period, no "(preprint)", no "v2". The parser uses
-   `· YYYY-MM` at end-of-line as the date anchor for sorting. Get this
-   wrong and the entry sorts last.
+   `· YYYY-MM` at end-of-line as the date anchor for sorting.
 
 5. Entry separator — exactly `---` on a line by itself, with blank lines
    above and below. Not `***`, not `___`, not `---next paper`, not inline.

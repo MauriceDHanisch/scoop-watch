@@ -80,8 +80,45 @@ class _ParsedBatch:
 
 _SECTION_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 _THEME_RE = re.compile(r"^###\s+(.+?)\s*$", re.MULTILINE)
-# Author line: "<names> · [arxiv:<id>](<url>) · YYYY-MM"
-_DATE_IN_AUTHOR_RE = re.compile(r"·\s*(\d{4}-\d{2})\s*$", re.MULTILINE)
+# Author line: "<names> · [arxiv:<id>](<url>) · YYYY-MM" (optional trailing -DD
+# is tolerated so an agent that wrote a full ISO date still parses cleanly).
+_DATE_IN_AUTHOR_RE = re.compile(r"·\s*(\d{4}-\d{2})(?:-\d{2})?\s*$", re.MULTILINE)
+# arxiv adopted the ``YYMM.NNNNN`` identifier in April 2007, so any 4-digit
+# prefix maps unambiguously to ``20YY-MM``. Used as a fallback date source
+# when the author-line date is missing, malformed, or implausible.
+_ARXIV_ID_RE = re.compile(r"arxiv:(\d{2})(\d{2})\.\d{4,5}", re.IGNORECASE)
+
+
+def _date_from_arxiv_id(text: str) -> str:
+    """Extract ``YYYY-MM`` from the first ``arxiv:YYMM.NNNNN`` reference."""
+    match = _ARXIV_ID_RE.search(text)
+    if not match:
+        return ""
+    yy, mm = int(match.group(1)), int(match.group(2))
+    if not (1 <= mm <= 12):
+        return ""
+    return f"20{yy:02d}-{mm:02d}"
+
+
+def _resolve_entry_date(text: str) -> str:
+    """Best-effort ``YYYY-MM`` for one entry, with three fallbacks.
+
+    Source 1: the ``· YYYY-MM`` token at the end of the author line.
+    Source 2: the arxiv id prefix (e.g. ``arxiv:2506.06623`` → ``2025-06``).
+    Returns ``""`` only when neither yields a plausible calendar year.
+
+    The arxiv id fallback recovers two real-world agent failure modes: writing
+    the YYMM prefix as the "year" (``· 2506-06``) and writing a full ISO date
+    with the day appended (``· 2025-09-30``). The arxiv link is the only
+    machine-readable date source on the entry that we can trust in those cases.
+    """
+    match = _DATE_IN_AUTHOR_RE.search(text)
+    if match:
+        date = match.group(1)
+        year = int(date[:4])
+        if 1900 <= year <= 2100:
+            return date
+    return _date_from_arxiv_id(text)
 
 
 def _project_theme_order(project: str) -> list[str]:
@@ -165,9 +202,7 @@ def _split_theme_into_entries(theme_body: str) -> list[_Entry]:
         # entries: a real entry starts with a bold title.
         if not text.startswith("**"):
             continue
-        date_match = _DATE_IN_AUTHOR_RE.search(text)
-        date = date_match.group(1) if date_match else ""
-        entries.append(_Entry(date=date, text=text))
+        entries.append(_Entry(date=_resolve_entry_date(text), text=text))
     return entries
 
 
@@ -210,22 +245,216 @@ def _merge_themes_in_order(
     return ordered
 
 
-def _render_theme(theme: str, entries: list[_Entry]) -> str:
-    """Wrap one theme's entries in a `<details>` block with a paper count.
+_UNDATED_YEAR = "Undated"  # bucket label for entries with a missing/bad date
 
-    Entries are emitted in the order received (caller sorts beforehand). Each
-    entry's text is followed by the standalone ``---`` rule the format
-    contract requires.
+
+def _normalize_theme(name: str) -> str:
+    """Case-insensitive comparison key with Unicode dash variants folded.
+
+    Real-world drift: a batch paraphrases a theme name with an en-dash where
+    the project description used a hyphen (or vice versa). Without folding,
+    those land in two different buckets and surface as duplicated themes in
+    the survey. Folded forms compare equal so the merger collapses them onto
+    the project's canonical spelling.
+    """
+    folded = name.lower().strip()
+    for dash in ("‐", "‑", "‒", "–", "—", "―", "−"):
+        folded = folded.replace(dash, "-")
+    # Collapse runs of whitespace so "Foo  bar" and "Foo bar" compare equal.
+    return " ".join(folded.split())
+
+
+def _canonicalize_theme_name(name: str, declared: list[str]) -> str:
+    """Map a parsed theme name onto the project's declared spelling if any
+    declared theme matches under ``_normalize_theme``. Otherwise return the
+    name verbatim (it stays in the alphabetical bucket for undeclared themes).
+    """
+    key = _normalize_theme(name)
+    for declared_name in declared:
+        if _normalize_theme(declared_name) == key:
+            return declared_name
+    return name
+
+
+def _year_of(date: str) -> str:
+    """Return the entry's calendar year as a 4-digit string, or ``_UNDATED_YEAR``.
+
+    Defensive against a common agent failure mode: writing the arxiv id's
+    YYMM prefix (e.g. ``2509`` for September 2025) as if it were the calendar
+    year, producing dates like ``2509-09``. The format contract demands
+    YYYY-MM with YYYY in the plausible range; anything else is treated as
+    undated so it surfaces in the trailing bucket instead of inventing a
+    bogus year heading.
+    """
+    if not date or "-" not in date:
+        return _UNDATED_YEAR
+    year_str = date.split("-", 1)[0]
+    if not (year_str.isdigit() and len(year_str) == 4):
+        return _UNDATED_YEAR
+    year = int(year_str)
+    if 1900 <= year <= 2100:
+        return year_str
+    return _UNDATED_YEAR
+
+
+def _group_entries_by_year(entries: list[_Entry]) -> list[tuple[str, list[_Entry]]]:
+    """Group already-sorted entries into ``[(year, entries)]`` runs.
+
+    Caller has already sorted entries by date descending, so a single pass
+    suffices; consecutive entries sharing a year emit one group. Entries with
+    a missing/unparseable/implausible date land in a trailing ``Undated``
+    group. The sort+single-pass approach keeps Undated trailing because the
+    empty string sorts before any plausible date under ``reverse=True``.
+    """
+    groups: list[tuple[str, list[_Entry]]] = []
+    for entry in entries:
+        year = _year_of(entry.date)
+        if groups and groups[-1][0] == year:
+            groups[-1][1].append(entry)
+        else:
+            groups.append((year, [entry]))
+    # Move the Undated group to the end if it landed in the middle (can happen
+    # when entries have a mix of plausible and implausible dates that mis-sort).
+    dated = [g for g in groups if g[0] != _UNDATED_YEAR]
+    undated = [g for g in groups if g[0] == _UNDATED_YEAR]
+    if len(undated) > 1:
+        # Merge multiple Undated groups into one.
+        merged = (
+            _UNDATED_YEAR,
+            [e for _y, es in undated for e in es],
+        )
+        undated = [merged]
+    return dated + undated
+
+
+# Pulls the title from the leading `**Title**` line and splits the rest into
+# the author line (line 2) and the analysis body (lines 3+).
+_ENTRY_HEAD_RE = re.compile(
+    r"^\*\*(?P<title>.+?)\*\*\s*\n(?P<author>[^\n]+)(?:\n+(?P<body>.+))?",
+    re.DOTALL,
+)
+# Splits "Authors · [arxiv:id](url) · YYYY-MM" into the three pieces.
+_AUTHOR_LINE_RE = re.compile(
+    r"^(?P<authors>.+?)\s+·\s+\[(?P<label>arxiv:[^\]]+)\]\((?P<url>[^)]+)\)"
+)
+
+
+def _render_entry(entry: _Entry) -> str:
+    """Wrap one entry in a `<details>` whose summary holds title + authors +
+    date and whose body holds the arxiv link + analysis + distinction line.
+
+    The summary uses `<small>` on the metadata after the title so the
+    entry line reads visibly lighter and smaller than the parent year and
+    theme summaries above it — three sizes (big/regular/small) without
+    using heading tags (which break the chevron when placed in `<summary>`).
+    """
+    match = _ENTRY_HEAD_RE.match(entry.text.strip())
+    if not match:
+        return entry.text
+    title = match.group("title").strip()
+    author_line = match.group("author").strip()
+    analysis = (match.group("body") or "").strip()
+
+    head = _AUTHOR_LINE_RE.match(author_line)
+    if head:
+        authors = head.group("authors").strip()
+        link_md = f"[{head.group('label')}]({head.group('url')})"
+    else:
+        # Author line that does not parse: keep it whole in the body and skip
+        # the duplication in the summary.
+        authors = author_line
+        link_md = ""
+
+    date = entry.date or "—"
+    summary = f"<strong>{title}</strong> <small>· {authors} · {date}</small>"
+    body_parts = [p for p in (link_md, analysis) if p]
+    body = "\n\n".join(body_parts)
+    return f"<details>\n<summary>{summary}</summary>\n\n{body}\n\n</details>"
+
+
+def _render_year_group(year: str, entries: list[_Entry]) -> str:
+    """Render one year as a collapsible `<details>` (closed by default)
+    whose body is a `<blockquote>` holding one `<details>` per entry.
+
+    GitHub's markdown renderer does NOT apply margin-left to nested
+    `<details>` by default — browser-CSS indentation is the convention but
+    GitHub's stylesheet overrides it to zero. To get visible indentation we
+    wrap inner blocks in `<blockquote>`, which GitHub styles with both a
+    left indent and a vertical bar; the bar doubles as a hierarchy cue.
+    The summary stays `<strong>` (inline) so the chevron remains attached
+    to the visible label — block tags like `<h4>` inside `<summary>` push
+    the chevron onto its own line and make it look attached to the wrong
+    element. Visual ladder: theme bar > year bar > entry analysis.
     """
     plural = "paper" if len(entries) == 1 else "papers"
-    label = f"<strong>{theme}</strong> ({len(entries)} {plural})"
-    # If there is no theme name, render the entries directly (no `<details>`
-    # wrap) — the project declared no themes and a collapsible with an empty
-    # label would read strangely.
-    bodies = "\n\n---\n\n".join(entry.text for entry in entries) + "\n\n---\n"
+    label = f"<strong>📅 {year} &nbsp;·&nbsp; {len(entries)} {plural}</strong>"
+    inner = "\n\n".join(_render_entry(e) for e in entries)
+    body = f"<blockquote>\n\n{inner}\n\n</blockquote>"
+    return f"<details>\n<summary>{label}</summary>\n\n{body}\n\n</details>"
+
+
+def _render_theme(theme: str, entries: list[_Entry]) -> str:
+    """Render a theme as a collapsible `<details>` (closed by default)
+    whose body is a `<blockquote>` holding its year groups.
+
+    Like the year summary, the theme summary is `<strong>` (inline) — block
+    tags inside `<summary>` displace the chevron and make it look attached
+    to the wrong element. The `<blockquote>` wrapper is where the visible
+    indentation comes from on GitHub (nested `<details>` alone is not
+    indented by GitHub's stylesheet). Every level is collapsed by default;
+    the reader drills from section → theme → year → paper analysis on
+    demand, with each step indented one bar deeper than the last.
+    """
+    plural = "paper" if len(entries) == 1 else "papers"
+    year_groups = _group_entries_by_year(entries)
+    inner = "\n\n".join(_render_year_group(y, es) for y, es in year_groups)
     if not theme:
-        return bodies
-    return f"<details>\n<summary>{label}</summary>\n\n{bodies}\n</details>"
+        # Project declared no themes — emit year groups directly (no theme
+        # `<details>` wrap; the year groups carry their own indent).
+        return inner
+    body = f"<blockquote>\n\n{inner}\n\n</blockquote>"
+    # `<big>` is inline (unlike `<h3>`/`<h4>` which break the chevron when
+    # placed inside `<summary>`) and GitHub renders it ~1.17x larger,
+    # giving the theme summary visible size weight over the year and entry
+    # summaries below it. Three sizes total: theme > year > entry.
+    label = (
+        f"<big><strong>📂 {theme} &nbsp;·&nbsp; {len(entries)} {plural}</strong></big>"
+    )
+    return f"<details>\n<summary>{label}</summary>\n\n{body}\n\n</details>"
+
+
+def _slug(text: str) -> str:
+    """Lowercase, ASCII-alnum-only slug for `<a name>` anchors and #links."""
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+
+
+def _section_anchor(section: str) -> str:
+    """Stable anchor for a section heading. We don't trust GitHub's auto-
+    generated anchors (they depend on emoji handling and count suffixes)."""
+    return _slug(section.encode("ascii", "ignore").decode("ascii"))
+
+
+def _render_toc(
+    buckets: dict[str, dict[str, list[_Entry]]],
+    declared_themes: list[str],
+    section_totals: dict[str, int],
+) -> str:
+    """A nested bullet list linking to each section, with per-theme counts.
+
+    Theme entries do not get anchors — the section anchor lands the reader
+    next to the theme they want; one click on the section heading expands.
+    Skipping theme anchors keeps the markup small and avoids the brittle
+    `<a name>` injection inside `<summary>` tags.
+    """
+    lines = ["## Contents", ""]
+    for section in _SECTION_ORDER:
+        section_anchor = _section_anchor(section)
+        lines.append(f"- [{section}](#{section_anchor}) ({section_totals[section]})")
+        for theme, entries in _merge_themes_in_order(buckets[section], declared_themes):
+            count = len(entries)
+            plural = "paper" if count == 1 else "papers"
+            lines.append(f"  - {theme} ({count} {plural})")
+    return "\n".join(lines)
 
 
 def _programmatic_merge(
@@ -251,8 +480,12 @@ def _programmatic_merge(
     its 1-based index so the caller can surface the warning to the user.
     """
     warn = on_warning or (lambda _msg: None)
+    declared_themes = _project_theme_order(project)
 
-    # Bucket all entries from all batches by (section, theme).
+    # Bucket all entries from all batches by (section, theme). Theme names
+    # parsed out of a batch are mapped onto the project's declared spelling
+    # whenever a (case-insensitive, dash-folded) match exists; this collapses
+    # innocent paraphrases like "Kohn–Sham" vs "Kohn-Sham" onto one bucket.
     buckets: dict[str, dict[str, list[_Entry]]] = {
         section: {} for section in _SECTION_ORDER
     }
@@ -274,7 +507,8 @@ def _programmatic_merge(
                 f"deep/batches/<date>/batch_{batch_idx - 1:02d}.md."
             )
         for (section, theme), entries in parsed.by_section_theme.items():
-            buckets[section].setdefault(theme, []).extend(entries)
+            canonical = _canonicalize_theme_name(theme, declared_themes)
+            buckets[section].setdefault(canonical, []).extend(entries)
 
     # Sort each (section, theme) by date descending (newest first). The empty
     # string from a missing date sorts last because '' < any real YYYY-MM.
@@ -282,11 +516,12 @@ def _programmatic_merge(
         for theme in section_buckets:
             section_buckets[theme].sort(key=lambda entry: entry.date or "", reverse=True)
 
-    declared_themes = _project_theme_order(project)
     confirmed_total = sum(len(v) for v in buckets[_CONFIRMED].values())
     potential_total = sum(len(v) for v in buckets[_POTENTIAL].values())
     surfaced = confirmed_total + potential_total
     non_overlapping = max(total_papers - surfaced, 0)
+
+    section_totals = {_CONFIRMED: confirmed_total, _POTENTIAL: potential_total}
 
     parts: list[str] = []
     parts.append(f"# 🔬 Scoop-watch Deep Survey — {project}")
@@ -300,6 +535,11 @@ def _programmatic_merge(
     parts.append(f"- {potential_total} potential scoops worth monitoring")
     parts.append(f"- {non_overlapping} papers reviewed and judged non-overlapping")
     parts.append("")
+
+    # Table of contents — anchors link to the section headings below. Cheap
+    # navigation for surveys with many themes.
+    parts.append(_render_toc(buckets, declared_themes, section_totals))
+    parts.append("")
     parts.append("---")
     parts.append("")
 
@@ -308,10 +548,20 @@ def _programmatic_merge(
         _POTENTIAL: f"## {_POTENTIAL} ({potential_total})",
     }
     for section in _SECTION_ORDER:
+        # Explicit `<a name>` anchor so TOC links land here regardless of
+        # GitHub's auto-anchor generation quirks (emoji handling, count
+        # suffix changes between runs).
+        parts.append(f'<a name="{_section_anchor(section)}"></a>')
         parts.append(section_titles[section])
         parts.append("")
         themes = _merge_themes_in_order(buckets[section], declared_themes)
-        for theme, entries in themes:
+        # Horizontal rule between themes inside a section, so the reader sees
+        # a clean visual cut between theme blocks even when every theme is
+        # collapsed and they would otherwise stack flush against each other.
+        for idx, (theme, entries) in enumerate(themes):
+            if idx > 0:
+                parts.append("---")
+                parts.append("")
             parts.append(_render_theme(theme, entries))
             parts.append("")
     return "\n".join(parts).rstrip() + "\n"
