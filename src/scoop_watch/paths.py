@@ -99,6 +99,45 @@ def logs_dir() -> Path:
     return data_root() / "logs"
 
 
+def deep_dir(name: str) -> Path:
+    """Top-level deep-mode directory, kept separate from the daily run tree.
+
+    Layout:
+        deep/
+        ├── fetch/<date>/        per-merged-group JSONL files
+        ├── batches/<date>/      per-batch synthesis outputs
+        └── archive/             final merged surveys
+
+    Consolidating under one ``deep/`` folder keeps the project root readable
+    when both daily runs (fetch-archive/, archive/) and deep surveys coexist.
+    """
+    return project_dir(name) / "deep"
+
+
+def deep_fetch_dir(name: str, date: str) -> Path:
+    """One directory per deep-mode run, holding per-merged-group JSONL files.
+
+    Per-group files (rather than one big partial JSONL) make resume trivial:
+    the presence of ``<group>.jsonl`` means that group is done and its papers
+    are persisted, so the next run skips its HTTP request entirely.
+    """
+    return deep_dir(name) / "fetch" / date
+
+
+def deep_batches_dir(name: str, date: str) -> Path:
+    """One directory per deep-mode run, holding per-batch synthesis outputs.
+
+    A ``batch_NN.md`` file is written as soon as the agent call for batch N
+    returns; resume only fires the missing batches.
+    """
+    return deep_dir(name) / "batches" / date
+
+
+def deep_archive_dir(name: str) -> Path:
+    """Final merged deep-survey output, separate from the daily archive."""
+    return deep_dir(name) / "archive"
+
+
 def read_json_path(name: str) -> Path:
     """Per-project list of arXiv ids the user has marked as read.
 

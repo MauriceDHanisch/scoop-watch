@@ -121,6 +121,7 @@ if [ "$needs_setup" = "true" ]; then
     printf '  %sscoop-watch setup%s    configure agent, model, schedule, search window\n' "$C" "$X"
 fi
 printf '  %sscoop-watch author%s   create your first project (start here)\n' "$C" "$X"
-printf '  %sscoop-watch run%s      generate a briefing\n' "$C" "$X"
-printf '  %sscoop-watch arm%s      schedule it (stops at reboot)\n' "$C" "$X"
+printf '  %sscoop-watch run%s      generate a daily briefing\n' "$C" "$X"
+printf '  %sscoop-watch deep%s     5-year survey of work overlapping your project\n' "$C" "$X"
+printf '  %sscoop-watch arm%s      schedule the daily briefing (stops at reboot)\n' "$C" "$X"
 printf '  %sscoop-watch read%s     tick papers you have read so they defer next run\n\n' "$C" "$X"

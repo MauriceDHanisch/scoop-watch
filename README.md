@@ -71,6 +71,7 @@ Scoop-watch autodetects which is available; override it in setup.
 
 ~/Documents/scoop-watch/         your data, visible and yours to edit
 ├── .env                        agent, model, schedule, search window
+├── logs/                       failed-fetch logs (when arXiv 429s)
 └── projects/
     └── <project>/
         ├── project.md          the project description (scoring input)
@@ -79,8 +80,12 @@ Scoop-watch autodetects which is available; override it in setup.
         ├── read.json           papers you have marked as read (filtered out)
         ├── archive/
         │   └── 2026-05-21.md   the daily briefings
-        └── fetch-archive/
-            └── 2026-05-21.json the raw fetched papers, kept for debugging
+        ├── fetch-archive/
+        │   └── 2026-05-21.json the raw fetched papers, kept for debugging
+        └── deep/                deep-survey outputs (`scoop-watch deep`)
+            ├── fetch/<date>/   per-merged-group JSONL files (one per query group)
+            ├── batches/<date>/ per-batch markdown checkpoints
+            └── archive/        final merged surveys, e.g. 2026-05-21_5y.md
 ```
 
 If `~/Documents` does not exist the data directory falls back to
@@ -96,6 +101,7 @@ scoop-watch author [project]     # launch an agent to write project.md + layout.
 scoop-watch new <project>        # scaffold a project from templates (no agent)
 scoop-watch run [project]        # briefing for one project, or all projects
 scoop-watch resynth [project]    # re-run only the agent on an existing fetch JSON
+scoop-watch deep [project]       # multi-year overlap survey (default 5 years)
 scoop-watch arm [project]        # schedule it on the global schedule
 scoop-watch disarm [project]     # stop the schedule
 scoop-watch read [project]       # tick papers you have read; hide from future runs
@@ -116,6 +122,32 @@ appends what you tick to the project's `read.json`. Every later run filters
 those papers out before synthesis, so a paper you have seen does not come back
 week after week. Matching is **version-agnostic**: marking `2602.20232v1` as
 read also hides `v2` when it appears.
+
+### Deep survey: a multi-year overlap pass
+
+`scoop-watch deep <project> [--years N]` runs a single sweep over the last N
+years (default 5) and produces an annotated bibliography of every paper that
+overlaps with your project. Two sections only — 🚨 Confirmed Scoop and ⚠️
+Potential Scoop — grouped by your `## Theme:` sub-headings, with each theme
+collapsed by default and entries sorted newest-first.
+
+Three stages, each separately resumable via file-existence checks:
+
+1. **Fetch** lands per-merged-group JSONL files at
+   `deep/fetch/<date>/<group>.jsonl`. A 429 mid-run only loses the in-flight
+   group; the next call reuses every completed file.
+2. **Synthesis** batches the corpus (default 100 papers/batch, 5 parallel
+   agent calls), checkpointing each batch to `deep/batches/<date>/batch_NN.md`
+   as it returns.
+3. **Merge** combines the batch outputs into the final
+   `deep/archive/<date>_<years>y.md`.
+
+Re-running with the same date skips any stage whose output already exists,
+so iterating on the prompts (`--force` wipes batches + archive but keeps the
+fetch) costs only the agent calls, not the arXiv hits. A typical 300-paper
+domain runs in ~10 minutes and costs ~$5 in Claude Opus credits; a 1000+ paper
+broader query scales linearly. Use `--fetch-only` first if you want to see the
+corpus size before committing to synthesis.
 
 ### Authoring a project
 

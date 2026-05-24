@@ -18,6 +18,7 @@ from . import (
     scaffold,
     scheduler,
     synthesize,
+    synthesize_deep,
     tips,
     ui,
     uninstaller,
@@ -367,6 +368,98 @@ def cmd_resynth(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_deep(args: argparse.Namespace) -> int:
+    """Multi-year deep survey of one project, with per-batch checkpoints.
+
+    The deep pipeline is three stages, each separately resumable:
+      1. Fetch — per-merged-group JSONL files under ``deep-fetch/<date>/``.
+      2. Synthesize — per-batch markdown under ``deep-batches/<date>/``.
+      3. Merge — final survey under ``deep-archive/<date>_<years>y.md``.
+
+    Re-running with the same ``--date`` skips any stage whose output exists.
+    """
+    project = args.project or _choose_project("Deep survey which project?")
+    if project is None:
+        return 0
+
+    years = args.years
+    days = years * 365
+    date = args.date or dt.date.today().isoformat()
+
+    archive_path = paths.deep_archive_dir(project) / f"{date}_{years}y.md"
+    if archive_path.is_file() and not args.force:
+        ui.warn(f"deep survey already exists: {archive_path}")
+        ui.hint("Pass --force to rebuild, or --date YYYY-MM-DD to write a new one.")
+        return 0
+    if args.force and archive_path.is_file():
+        archive_path.unlink()
+    if args.force:
+        # Re-doing every batch from scratch on --force; the fetch is preserved
+        # because re-fetching is the slow + expensive part and rarely what
+        # --force means in practice.
+        batches_dir = paths.deep_batches_dir(project, date)
+        for stale in batches_dir.glob("batch_*.md"):
+            stale.unlink()
+
+    project_config = config.load_config(project)
+    queries = project_config["queries"]
+    merged_count = len(fetch.group_queries(queries))
+    ui.step(
+        f"{project}  deep fetch ({years}y / {days}d window, "
+        f"{len(queries)} queries -> {merged_count} merged requests)"
+    )
+
+    def _warn_query(name: str, error: str) -> None:
+        ui.substep(f"query '{name}' failed: {error.splitlines()[0]}")
+
+    try:
+        papers = fetch.fetch_deep(
+            queries,
+            days=days,
+            out_dir=paths.deep_fetch_dir(project, date),
+            max_results=args.max_results,
+            on_query_error=_warn_query,
+            progress=ui.substep,
+        )
+    except fetch.FetchAborted as aborted:
+        log_path = _write_fetch_failure_log(project, aborted)
+        ui.warn(f"{project}  deep fetch aborted; resume with `scoop-watch deep`")
+        ui.detail("log", str(log_path))
+        ui.detail(
+            "note",
+            "successfully-fetched groups are preserved; rerun picks up where it stopped",
+        )
+        return 1
+
+    ui.ok(f"{project}  fetched {len(papers)} unique papers")
+    if args.fetch_only:
+        ui.detail("location", str(paths.deep_fetch_dir(project, date)))
+        ui.hint("Run `scoop-watch deep` again without --fetch-only to synthesize.")
+        return 0
+
+    if not papers:
+        ui.warn(f"{project}  no papers to synthesize")
+        return 0
+
+    ui.step(
+        f"{project}  deep synthesis "
+        f"({len(papers)} papers in batches of {args.batch_size}, "
+        f"max_workers={args.parallel})"
+    )
+    out_path = synthesize_deep.synthesize_deep(
+        project,
+        papers,
+        years=years,
+        date=date,
+        batch_size=args.batch_size,
+        max_workers=args.parallel,
+        progress=ui.substep,
+    )
+    ui.ok(f"{project}  deep survey written")
+    ui.detail("file", str(out_path))
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     projects = [args.project] if args.project else config.list_projects()
     if not projects:
@@ -500,6 +593,46 @@ def _build_parser() -> argparse.ArgumentParser:
         "--date", help="YYYY-MM-DD; defaults to the latest fetch archive"
     )
 
+    deep_parser = sub.add_parser(
+        "deep",
+        help="multi-year survey of one project, batched + checkpointed",
+    )
+    deep_parser.add_argument("project", nargs="?")
+    deep_parser.add_argument(
+        "--years", type=int, default=5, help="years back to fetch (default: 5)"
+    )
+    deep_parser.add_argument(
+        "--date",
+        help="YYYY-MM-DD label for this run (default: today). Resumes when the "
+        "label already has partial outputs on disk.",
+    )
+    deep_parser.add_argument(
+        "--max-results",
+        type=int,
+        default=2000,
+        help="max results per merged request (default: 2000, arXiv's per-request cap)",
+    )
+    deep_parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=100,
+        help="papers per synthesis batch (default: 100; ~50k tokens/call)",
+    )
+    deep_parser.add_argument(
+        "--parallel",
+        type=int,
+        default=5,
+        help="concurrent agent calls during batch fan-out (default: 5)",
+    )
+    deep_parser.add_argument(
+        "--fetch-only", action="store_true", help="fetch and checkpoint, then stop"
+    )
+    deep_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="wipe existing batch+archive outputs for this date (preserves fetch)",
+    )
+
     arm_parser = sub.add_parser("arm", help="schedule a project's daily run")
     arm_parser.add_argument("project", nargs="?")
 
@@ -540,6 +673,7 @@ def main(argv: list[str] | None = None) -> int:
         "author": cmd_author,
         "run": cmd_run,
         "resynth": cmd_resynth,
+        "deep": cmd_deep,
         "arm": cmd_arm,
         "disarm": cmd_disarm,
         "read": cmd_read,

@@ -18,6 +18,7 @@ _POOLS: dict[str, list[str]] = {
         "The fetch-archive/ folder keeps the raw arXiv JSON behind every briefing.",
         "'scoop-watch status' shows when the next scheduled run is.",
         "Already-read papers appear in a collapsed appendix at the end of the briefing.",
+        "'scoop-watch deep <project>' for a multi-year survey of overlapping work.",
     ],
     "arm": [
         "'scoop-watch run' to generate a briefing right now.",
@@ -42,7 +43,8 @@ _POOLS: dict[str, list[str]] = {
     "status": [
         "'scoop-watch run' for a fresh briefing now.",
         "'scoop-watch read' to defer papers you've already read.",
-        "'scoop-watch setup --reconfigure' to change the schedule or search window.",
+        "'scoop-watch setup' to change the schedule or search window (Enter to keep).",
+        "'scoop-watch deep <project>' for a once-a-year 5-year overlap survey.",
     ],
     "update": [
         "'scoop-watch run' to produce a fresh briefing with the new version.",
@@ -50,13 +52,21 @@ _POOLS: dict[str, list[str]] = {
     ],
     "setup": [
         "Then 'scoop-watch author' to create your first project.",
-        "Already configured? Pass --reconfigure to change a setting.",
+        "Re-run 'scoop-watch setup' any time — current values are pre-filled defaults.",
+        "After your first daily run, try 'scoop-watch deep <project>' for a 5-year survey.",
     ],
     "resynth": [
         "Useful when arXiv is rate-limited or you tweaked layout.md / project.md.",
         "The fetch is not re-done; only the agent runs.",
         "Pass --date YYYY-MM-DD to resynth a specific day's fetch.",
         "Resynths still produce a new -vN, never overwrite previous briefings.",
+    ],
+    "deep": [
+        "Re-run with --force to re-synthesize without re-fetching.",
+        "Per-merged-group JSONL is in deep/fetch/<date>/ — inspect or replay it freely.",
+        "Batches checkpoint to deep/batches/<date>/ — a 429 mid-run loses only one.",
+        "Use --years to widen or narrow the window (default 5).",
+        "Default batches and concurrency are tuned for Claude Opus; --parallel adjusts.",
     ],
 }
 

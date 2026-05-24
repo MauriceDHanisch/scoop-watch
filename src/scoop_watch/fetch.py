@@ -308,6 +308,119 @@ def papers_as_dicts(papers: list[Paper]) -> list[dict[str, Any]]:
     return [asdict(p) for p in papers]
 
 
+def _group_slug(name: str) -> str:
+    """Filesystem-safe slug for a merged-group name (used as a JSONL filename)."""
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
+    return safe.strip("_") or "unnamed"
+
+
+def fetch_deep(
+    queries: list[dict[str, Any]],
+    days: int,
+    out_dir: Path,
+    max_results: int = 2000,
+    on_query_error: Callable[[str, str], None] | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> list[Paper]:
+    """Deep-mode fetch: per-merged-group JSONL on disk, resumable.
+
+    Writes each merged-group's results to ``out_dir/<group_slug>.jsonl`` as it
+    completes. On a later invocation with the same ``out_dir``, any group whose
+    file already exists is skipped — this is the resume mechanism: a 429 mid-
+    run loses only the in-flight group, and the next call picks up where it
+    left off.
+
+    Returns the deduped union of all papers (across both freshly-fetched and
+    already-on-disk groups). ``max_results`` defaults to 2000 (arXiv's per-
+    request cap) so a 5-year window doesn't get silently truncated.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    report = progress or (lambda _message: None)
+    client = arxiv.Client(page_size=100, delay_seconds=3.0, num_retries=3)
+
+    rows: dict[str, dict[str, Any]] = {}
+    matches: dict[str, list[str]] = {}
+
+    def _absorb(paper: dict[str, Any], hits: list[str]) -> None:
+        """Merge a paper dict (from JSONL or fresh fetch) into the running set."""
+        pid = paper["arxiv_id"]
+        existing = matches.setdefault(pid, [])
+        for name in hits:
+            if name not in existing:
+                existing.append(name)
+        if pid not in rows:
+            rows[pid] = {k: v for k, v in paper.items() if k != "matched_queries"}
+
+    merged_entries = group_queries(queries)
+    total = len(merged_entries)
+
+    for idx, entry in enumerate(merged_entries, start=1):
+        group_path = out_dir / f"{_group_slug(entry.name)}.jsonl"
+        if group_path.is_file():
+            count = 0
+            for line in group_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                paper = json.loads(line)
+                _absorb(paper, paper.get("matched_queries", []))
+                count += 1
+            report(f"[{idx}/{total}] {entry.name}: {count} cached on disk (skipped)")
+            continue
+
+        query_string = _merged_query_string(entry, days)
+        search = arxiv.Search(
+            query=query_string,
+            max_results=max_results,
+            sort_by=arxiv.SortCriterion.SubmittedDate,
+            sort_order=arxiv.SortOrder.Descending,
+        )
+        report(f"[{idx}/{total}] {entry.name}: requesting (up to {max_results})...")
+        try:
+            results = list(client.results(search))
+        except arxiv.ArxivError as error:
+            if on_query_error is not None:
+                on_query_error(entry.name, str(error))
+            url = getattr(error, "url", "") or ""
+            raise FetchAborted(entry.name, str(error), url) from error
+
+        # Build the group's paper records and append atomically: write to a
+        # ``.tmp`` and rename so a SIGKILL mid-write never leaves a half file.
+        tmp_path = group_path.with_suffix(".jsonl.tmp")
+        group_rows = []
+        with tmp_path.open("w", encoding="utf-8") as fh:
+            for result in results:
+                paper_id = result.get_short_id()
+                title = " ".join(result.title.split())
+                abstract = " ".join(result.summary.split())
+                hits = _matched_queries_for(entry, title, abstract)
+                row = dict(
+                    arxiv_id=paper_id,
+                    title=title,
+                    authors=[author.name for author in result.authors],
+                    abstract=abstract,
+                    submitted=result.published.date().isoformat(),
+                    categories=list(result.categories),
+                    primary_category=result.primary_category,
+                    url=result.entry_id,
+                    matched_queries=hits,
+                )
+                fh.write(json.dumps(row) + "\n")
+                group_rows.append(row)
+        tmp_path.rename(group_path)
+
+        rows_before = len(rows)
+        for row in group_rows:
+            _absorb(row, row["matched_queries"])
+        new_papers = len(rows) - rows_before
+        report(
+            f"[{idx}/{total}] {entry.name}: "
+            f"{len(results)} returned, {new_papers} new ({len(rows)} unique)"
+        )
+
+    papers = [Paper(**rows[pid], matched_queries=list(matches[pid])) for pid in rows]
+    return sorted(papers, key=lambda p: p.submitted, reverse=True)
+
+
 def archive_papers(path: Path, tiered: TieredPapers) -> None:
     """Write the fetched papers to ``path`` as indented JSON for inspection.
 
