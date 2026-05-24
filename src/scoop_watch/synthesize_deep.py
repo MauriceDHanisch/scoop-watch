@@ -235,6 +235,7 @@ def _programmatic_merge(
     start_date: str,
     end_date: str,
     total_papers: int,
+    on_warning: Callable[[str], None] | None = None,
 ) -> str:
     """Combine batch outputs into the final survey, deterministically.
 
@@ -243,13 +244,36 @@ def _programmatic_merge(
     only sorts, groups, counts and wraps the entries those batches produced.
     Entries are kept verbatim — never paraphrased — so no analytical content
     is at risk.
+
+    A non-empty batch body that parses to zero entries almost always means
+    the agent drifted from the format contract (see ``synthesis_deep.md``):
+    when ``on_warning`` is provided, the merger reports each such batch by
+    its 1-based index so the caller can surface the warning to the user.
     """
+    warn = on_warning or (lambda _msg: None)
+
     # Bucket all entries from all batches by (section, theme).
     buckets: dict[str, dict[str, list[_Entry]]] = {
         section: {} for section in _SECTION_ORDER
     }
-    for body in bodies:
-        for (section, theme), entries in _parse_batch(body).by_section_theme.items():
+    for batch_idx, body in enumerate(bodies, start=1):
+        parsed = _parse_batch(body)
+        entry_count = sum(len(es) for es in parsed.by_section_theme.values())
+        # A legitimately-empty batch ("no scoops in this batch") emits the two
+        # expected section headings with no entries — that's the contract, not
+        # drift. Only warn when the parser found no entries AND none of the
+        # expected `## 🚨 / ## ⚠️` headings either: in that case the agent
+        # produced text that the parser doesn't recognise at all.
+        sections_present = _split_into_sections(body)
+        recognised = sum(1 for s in _SECTION_ORDER if s in sections_present)
+        if entry_count == 0 and body.strip() and recognised == 0:
+            warn(
+                f"batch {batch_idx} parsed to 0 entries and no recognised "
+                f"section headings; the agent may have drifted from the "
+                f"deep-survey format (see synthesis_deep.md). Inspect "
+                f"deep/batches/<date>/batch_{batch_idx - 1:02d}.md."
+            )
+        for (section, theme), entries in parsed.by_section_theme.items():
             buckets[section].setdefault(theme, []).extend(entries)
 
     # Sort each (section, theme) by date descending (newest first). The empty
@@ -421,6 +445,7 @@ def synthesize_deep(
         start_date=start.isoformat(),
         end_date=end.isoformat(),
         total_papers=len(papers),
+        on_warning=lambda msg: report(f"WARNING: {msg}"),
     )
 
     archive = paths.deep_archive_dir(project)

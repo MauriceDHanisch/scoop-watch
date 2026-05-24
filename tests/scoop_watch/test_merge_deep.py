@@ -222,6 +222,72 @@ def test_merge_drops_empty_themes_and_handles_no_entries():
     assert "100 papers reviewed and judged non-overlapping" in merged
 
 
+def test_merge_warns_when_a_batch_parses_to_zero_entries():
+    """A non-empty batch that produces no parseable entries almost always
+    means the agent drifted from the format contract; the merger reports
+    each such batch so the user can re-inspect and re-fire it."""
+    good = _batch_md(
+        confirmed_by_theme={"T": [("p1", "2024-01")]},
+        potential_by_theme={},
+    )
+    drifted = (
+        "# Survey\nHere are some papers I found:\n\n"
+        "1. Some Title (2024) — analysis here\n"
+    )  # totally off-spec: no `##` sections, no `**` entries
+    warnings: list[str] = []
+    synthesize_deep._programmatic_merge(
+        "demo_no_themes",
+        [good, drifted],
+        years=5,
+        start_date="2020-01-01",
+        end_date="2025-12-31",
+        total_papers=2,
+        on_warning=warnings.append,
+    )
+    assert any("batch 2 parsed to 0 entries" in w for w in warnings), warnings
+    # The well-formed batch is unaffected by the warning.
+    assert not any("batch 1" in w for w in warnings)
+
+
+def test_merge_does_not_warn_on_legitimately_empty_batch():
+    """A batch with the two section headings and no entries (the contract
+    for 'no scoops in this batch') is not an error — no warning fires."""
+    empty_but_correct = "## 🚨 Confirmed Scoop\n\n## ⚠️ Potential Scoop\n"
+    warnings: list[str] = []
+    synthesize_deep._programmatic_merge(
+        "demo_no_themes",
+        [empty_but_correct],
+        years=5,
+        start_date="2020-01-01",
+        end_date="2025-12-31",
+        total_papers=1,
+        on_warning=warnings.append,
+    )
+    assert warnings == []
+
+
+def test_synthesis_prompt_documents_the_strict_format_contract():
+    """Regression: the prompt must explicitly tell the agent the output is
+    parsed by a regex. The contract must name (in some form) every element
+    the parser relies on, so any drift the agent might do is named-and-
+    forbidden in the prompt."""
+    from scoop_watch import paths
+
+    text = paths.package_text("synthesis_deep.md")
+    # The contract is announced.
+    assert "regex parser" in text.lower() or "regex" in text.lower()
+    # Each parser-load-bearing element is named with its exact form.
+    assert "## 🚨 Confirmed Scoop" in text
+    assert "## ⚠️ Potential Scoop" in text
+    assert "### " in text  # theme-heading depth pinned
+    assert "**<title" in text.lower() or "**<paper title" in text.lower()
+    # Author-line + date end-of-line rule documented.
+    assert "YYYY-MM" in text
+    assert "·" in text  # the exact middle-dot separator is shown
+    # `---` rule discipline is documented.
+    assert "---" in text
+
+
 def test_merge_preserves_entry_text_verbatim():
     """The merger never paraphrases; every entry's analysis block reaches the
     final output exactly as the per-batch agent wrote it."""
