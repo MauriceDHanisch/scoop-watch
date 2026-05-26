@@ -23,6 +23,16 @@ from pathlib import Path
 
 from . import config, paths
 
+# launchd does not inherit the user's shell PATH. Without this
+# EnvironmentVariables entry, an overnight run that reaches synthesis
+# fails with "'claude' not found on PATH" because claude / codex / uv
+# usually live in ~/.local/bin or Homebrew's bin dirs, neither of which
+# launchd searches by default. Covering Apple Silicon and Intel Homebrew
+# plus ~/.local/bin matches the union of real-world install locations.
+_LAUNCHD_PATH = (
+    "{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+)
+
 _PLIST_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -35,6 +45,10 @@ _PLIST_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
     <string>run</string>
     <string>{project}</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>{path}</string>
+  </dict>
   <key>StartCalendarInterval</key>
   <array>
 {calendar_entries}
@@ -139,6 +153,7 @@ def arm(project: str, weekdays: list[str], time: str) -> None:
             project=project,
             calendar_entries=_calendar_entries(weekdays, time),
             log_path=log_path,
+            path=_LAUNCHD_PATH.format(home=str(Path.home())),
         ),
         encoding="utf-8",
     )
@@ -234,8 +249,12 @@ def schedule_retry(
     """
     shim = paths.shim_path()
     seconds = delay_minutes * 60
+    # The detached subshell inherits whatever PATH launchd handed the
+    # parent. Belt-and-braces: export the same broad PATH the armed
+    # plist uses so the retry can find claude / codex / uv.
+    path_export = _LAUNCHD_PATH.format(home=str(Path.home()))
     inner = (
-        f"sleep {seconds} && {shim} run {project} "
+        f"export PATH={path_export}; sleep {seconds} && {shim} run {project} "
         f"--retry-attempt={attempt} --session-date={session_date}"
     )
     try:

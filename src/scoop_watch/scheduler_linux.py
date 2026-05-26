@@ -12,11 +12,22 @@ import subprocess
 
 from . import config, paths
 
+# systemd's --user manager starts services with a stripped PATH that does
+# NOT include %h/.local/bin, where the agent CLIs (claude, codex) and uv
+# typically install. Without this Environment= line, an overnight run that
+# reaches synthesis fails with "'claude' not found on PATH" even though
+# the interactive shell finds it. Keep the value broad enough to cover
+# both pipx-style installs (~/.local/bin) and system installs.
+_SERVICE_PATH = (
+    "%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+)
+
 _SERVICE_TEMPLATE = """[Unit]
 Description=scoop-watch briefing for {project}
 
 [Service]
 Type=oneshot
+Environment=PATH={path}
 ExecStart={shim} run {project}
 """
 
@@ -59,7 +70,9 @@ def arm(project: str, weekdays: list[str], time: str) -> None:
     stem = _unit_stem(project)
 
     (unit_dir / f"{stem}.service").write_text(
-        _SERVICE_TEMPLATE.format(project=project, shim=paths.shim_path()),
+        _SERVICE_TEMPLATE.format(
+            project=project, shim=paths.shim_path(), path=_SERVICE_PATH
+        ),
         encoding="utf-8",
     )
     (unit_dir / f"{stem}.timer").write_text(
@@ -152,6 +165,9 @@ def schedule_retry(
         f"--on-active={delay_minutes}min",
         f"--unit={unit}",
         f"--description=scoop-watch retry {attempt} for {project}",
+        # Same PATH issue as the armed service: the transient unit also
+        # needs %h/.local/bin to find claude / codex / uv at synthesis.
+        f"--setenv=PATH={_SERVICE_PATH}",
         str(shim),
         "run",
         project,

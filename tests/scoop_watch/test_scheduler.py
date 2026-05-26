@@ -28,9 +28,45 @@ def test_on_calendar_subset_keeps_weekday_order():
 
 
 def test_service_template_runs_the_project():
-    text = scheduler._SERVICE_TEMPLATE.format(project="demo", shim="/bin/scoop-watch")
+    text = scheduler._SERVICE_TEMPLATE.format(
+        project="demo", shim="/bin/scoop-watch", path=scheduler._SERVICE_PATH
+    )
     assert "ExecStart=/bin/scoop-watch run demo" in text
     assert "Type=oneshot" in text
+
+
+def test_service_template_exports_user_local_bin_on_path():
+    """Regression: an overnight run reaches synthesis and fails with
+    "'claude' not found on PATH" because systemd --user strips PATH down
+    to system dirs only. The armed service must add %h/.local/bin (where
+    claude / codex / uv normally live) so synthesis can find the agent."""
+    text = scheduler._SERVICE_TEMPLATE.format(
+        project="demo", shim="/bin/scoop-watch", path=scheduler._SERVICE_PATH
+    )
+    assert "Environment=PATH=" in text
+    assert "%h/.local/bin" in text
+
+
+def test_schedule_retry_exports_user_local_bin_on_path(monkeypatch):
+    """Same PATH issue applies to the transient retry unit — it must also
+    carry %h/.local/bin via --setenv=PATH=..."""
+    import subprocess
+
+    captured: dict = {}
+
+    def fake_run(cmd, capture_output, text):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(scheduler.subprocess, "run", fake_run)
+    monkeypatch.setattr(scheduler.paths, "shim_path", lambda: "/x/scoop-watch")
+
+    scheduler.schedule_retry(
+        "ofdft", attempt=1, delay_minutes=60, session_date="2026-05-25"
+    )
+    path_flags = [arg for arg in captured["cmd"] if arg.startswith("--setenv=PATH=")]
+    assert path_flags, "transient retry unit must export PATH"
+    assert "%h/.local/bin" in path_flags[0]
 
 
 def test_parse_list_timers_splits_columns_around_double_spaces():

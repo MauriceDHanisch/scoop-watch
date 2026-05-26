@@ -80,3 +80,52 @@ def test_plist_round_trips_through_disk(tmp_path, monkeypatch):
 
     schedule = scheduler_macos._read_calendar_from_plist("demo")
     assert schedule == (["Mon", "Thu"], "06:45")
+
+
+def test_plist_exports_user_local_bin_on_path(tmp_path, monkeypatch):
+    """launchd does not inherit the user's shell PATH; without an
+    EnvironmentVariables/PATH entry, synthesis fails with "'claude' not
+    found on PATH" the same way the Linux service did."""
+    monkeypatch.setattr(scheduler_macos.paths, "launchd_plist_dir", lambda: tmp_path)
+    monkeypatch.setattr(scheduler_macos.paths, "logs_dir", lambda: tmp_path / "logs")
+    monkeypatch.setattr(
+        scheduler_macos.paths, "shim_path", lambda: "/usr/local/bin/scoop-watch"
+    )
+    monkeypatch.setattr(
+        scheduler_macos,
+        "_launchctl",
+        lambda *args: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+    )
+
+    scheduler_macos.arm("demo", ["Mon"], "06:45")
+
+    text = (tmp_path / "com.scoop-watch.demo.plist").read_text(encoding="utf-8")
+    assert "<key>EnvironmentVariables</key>" in text
+    assert "<key>PATH</key>" in text
+    assert "/.local/bin" in text
+    assert "/opt/homebrew/bin" in text
+
+
+def test_macos_schedule_retry_exports_path(monkeypatch):
+    """Same PATH issue for the detached retry subshell on macOS."""
+    captured: dict = {}
+
+    class FakeProc:
+        pid = 12345
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return FakeProc()
+
+    monkeypatch.setattr(scheduler_macos.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        scheduler_macos.paths, "shim_path", lambda: "/usr/local/bin/scoop-watch"
+    )
+
+    scheduler_macos.schedule_retry(
+        "ofdft", attempt=1, delay_minutes=60, session_date="2026-05-25"
+    )
+    inner = captured["cmd"][-1]
+    assert "export PATH=" in inner
+    assert "/.local/bin" in inner
+    assert "/opt/homebrew/bin" in inner
