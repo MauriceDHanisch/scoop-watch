@@ -66,18 +66,21 @@ def test_load_config_applies_defaults(monkeypatch, tmp_path):
 
 
 def test_recent_days_from_env(monkeypatch, tmp_path):
+    """An explicit RECENT_DAYS in .env wins over the default. Use a value
+    that does not equal the current default so the test verifies override,
+    not coincidence."""
     monkeypatch.setenv("WATCH_DATA_DIR", str(tmp_path))
-    (tmp_path / ".env").write_text("RECENT_DAYS=30\n")
-    assert config.recent_days() == 30
+    (tmp_path / ".env").write_text("RECENT_DAYS=45\n")
+    assert config.recent_days() == 45
 
 
 def test_recent_days_fallback_when_unset_or_invalid(monkeypatch, tmp_path):
     monkeypatch.setenv("WATCH_DATA_DIR", str(tmp_path))
-    assert config.recent_days() == 90
+    assert config.recent_days() == 30
     (tmp_path / ".env").write_text("RECENT_DAYS=not-a-number\n")
-    assert config.recent_days() == 90
+    assert config.recent_days() == 30
     (tmp_path / ".env").write_text("RECENT_DAYS=0\n")
-    assert config.recent_days() == 90
+    assert config.recent_days() == 30
 
 
 def test_default_weekdays_from_env(monkeypatch, tmp_path):

@@ -185,7 +185,8 @@ current value as the default, so press Enter to keep or type to override.
 No `sudo`. Check state with `scoop-watch status`, or `systemctl --user
 list-timers` on Linux / `launchctl print gui/$UID/com.scoop-watch.<project>`
 on macOS. A missed day is not lost: every run refetches the whole search
-window (90 days by default), so skipped papers resurface under "Last 7 days".
+window (30 days by default — use `scoop-watch deep` for multi-year sweeps),
+so skipped papers resurface under "Last 7 days".
 
 ---
 

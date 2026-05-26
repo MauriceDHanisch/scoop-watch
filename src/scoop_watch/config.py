@@ -31,7 +31,11 @@ WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 # after the previous evening's announcement batch.
 DEFAULT_WEEKDAYS = list(WEEKDAYS[:5])
 DEFAULT_TIME = "04:00"
-DEFAULT_RECENT_DAYS = 90
+# 30 days is the daily-briefing search window. `scoop-watch deep` covers the
+# multi-year span on demand, so the daily run does not need to re-walk a
+# 90-day rolling window — that scope is what was driving the longest fetches
+# and pushing arXiv toward rate-limiting.
+DEFAULT_RECENT_DAYS = 30
 
 
 def load_env() -> dict[str, str]:
@@ -81,7 +85,7 @@ def default_weekdays() -> list[str]:
 
 
 def recent_days() -> int:
-    """Fetch window in days from .env (RECENT_DAYS), else 90."""
+    """Fetch window in days from .env (RECENT_DAYS), else 30."""
     raw = load_env().get("RECENT_DAYS", "")
     try:
         days = int(raw)

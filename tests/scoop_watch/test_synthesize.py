@@ -106,7 +106,7 @@ def test_synthesize_runs_one_pass_per_nonempty_tier(monkeypatch, tmp_path):
     assert "# 🔬 Scoop-watch Briefing" in text
     assert "⚡ Last 24 hours" in text
     assert "📅 Last 7 days" in text
-    assert "🗂️ Last 90 days" in text  # config.recent_days() default is 90
+    assert "🗂️ Last 30 days" in text  # config.recent_days() default is 30
     # horizontal rule between tiers
     assert "\n---\n" in text
 
@@ -124,7 +124,7 @@ def test_synthesize_single_pass_when_only_recent(monkeypatch, tmp_path):
     # All three tier headings present; the two empty ones carry a placeholder.
     assert "⚡ Last 24 hours" in text
     assert "📅 Last 7 days" in text
-    assert "🗂️ Last 90 days" in text
+    assert "🗂️ Last 30 days" in text
     assert text.count("_No new papers in this window._") == 2
 
 
