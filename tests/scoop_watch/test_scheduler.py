@@ -49,6 +49,63 @@ def test_parse_list_timers_splits_columns_around_double_spaces():
     assert parsed["activates"] == "scoop-watch-demo.service"
 
 
+def test_schedule_retry_invokes_systemd_run_with_correct_unit_and_args(monkeypatch):
+    """A retry is scheduled as a transient systemd unit fired ``delay`` from
+    now, running ``scoop-watch run <project> --retry-attempt=N``. The unit
+    name embeds project + attempt so simultaneous retries don't collide on
+    the bus; the function returns the unit name so the caller can log it."""
+    import subprocess
+
+    captured: dict = {}
+
+    def fake_run(cmd, capture_output, text):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(scheduler.subprocess, "run", fake_run)
+    monkeypatch.setattr(scheduler.paths, "shim_path", lambda: "/x/scoop-watch")
+
+    unit = scheduler.schedule_retry(
+        "ofdft", attempt=2, delay_minutes=60, session_date="2026-05-25"
+    )
+    assert unit == "scoop-watch-ofdft-retry-2"
+    cmd = captured["cmd"]
+    assert cmd[:2] == ["systemd-run", "--user"]
+    assert "--on-active=60min" in cmd
+    assert "--unit=scoop-watch-ofdft-retry-2" in cmd
+    # The transient unit runs the shim with retry-attempt AND session-date,
+    # so the retry's log appends to the same per-session file.
+    assert cmd[-5:] == [
+        "/x/scoop-watch",
+        "run",
+        "ofdft",
+        "--retry-attempt=2",
+        "--session-date=2026-05-25",
+    ]
+
+
+def test_schedule_retry_returns_empty_string_on_systemd_run_failure(monkeypatch):
+    """If `systemd-run` is missing or rejects the request, the function
+    returns an empty string rather than raising, so the abort path always
+    completes (the CLI then degrades to a 'rerun manually' hint)."""
+    import subprocess
+
+    monkeypatch.setattr(
+        scheduler.subprocess,
+        "run",
+        lambda *a, **kw: subprocess.CompletedProcess(
+            [], returncode=1, stdout="", stderr="boom"
+        ),
+    )
+    monkeypatch.setattr(scheduler.paths, "shim_path", lambda: "/x/scoop-watch")
+    assert (
+        scheduler.schedule_retry(
+            "ofdft", attempt=1, delay_minutes=60, session_date="2026-05-25"
+        )
+        == ""
+    )
+
+
 def test_timer_template_is_reboot_ephemeral():
     text = scheduler._TIMER_TEMPLATE.format(
         project="demo", on_calendar="Mon,Wed *-*-* 07:30:00"

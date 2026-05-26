@@ -219,3 +219,33 @@ def last_run_line(project: str) -> str:
     if not match or match.group(1) == "(none)":
         return "never (just armed)"
     return f"last exit code {match.group(1)}"
+
+
+def schedule_retry(
+    project: str, attempt: int, delay_minutes: int, session_date: str
+) -> str:
+    """Schedule a one-shot retry via a detached `sleep && command` subshell.
+
+    macOS launchd has no `--on-active`-style one-shot timer that survives
+    after the parent exits without creating a persistent plist; the cleanest
+    cross-version-of-macOS workaround is a detached `nohup sh -c 'sleep N &&
+    command' &`. The retry command embeds the session date so its log
+    appends to the same per-session file as the initial attempt.
+    """
+    shim = paths.shim_path()
+    seconds = delay_minutes * 60
+    inner = (
+        f"sleep {seconds} && {shim} run {project} "
+        f"--retry-attempt={attempt} --session-date={session_date}"
+    )
+    try:
+        proc = subprocess.Popen(
+            ["nohup", "sh", "-c", inner],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return str(proc.pid)
+    except OSError:
+        return ""

@@ -107,33 +107,65 @@ def cmd_author(args: argparse.Namespace) -> int:
     return 0
 
 
-def _write_fetch_failure_log(project: str, aborted: fetch.FetchAborted) -> Path:
-    """Persist a failed fetch to ``logs/<project>_<timestamp>.log``.
+def _append_fetch_failure_log(
+    project: str,
+    aborted: fetch.FetchAborted,
+    session_date: str,
+    attempt: int,
+    next_retry_unit: str = "",
+) -> Path:
+    """Append a failed-fetch record to ``logs/<project>_<session_date>.log``.
 
-    The log captures the offending query name, error message, and the request
-    URL so the user can decide whether to retry or wait for arXiv to recover.
-    The directory is created on first write.
+    All attempts (original + retries) within one scheduling cycle share a
+    single log file, so a morning post-mortem of "what happened overnight"
+    reads as one chronological story instead of N separate files. Each
+    attempt prepends a clear separator with its attempt number and the
+    scheduled next-retry unit (if any) so the chain is visible at a glance.
     """
     logs = paths.logs_dir()
     logs.mkdir(parents=True, exist_ok=True)
-    stamp = dt.datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    log_path = logs / f"{project}_{stamp}.log"
-    body = (
-        f"timestamp: {dt.datetime.now().isoformat(timespec='seconds')}\n"
-        f"project:   {project}\n"
-        f"query:     {aborted.query}\n"
-        f"error:     {aborted.error}\n"
-        f"url:       {aborted.url}\n"
+    log_path = logs / f"{project}_{session_date}.log"
+    now_iso = dt.datetime.now().isoformat(timespec="seconds")
+    label = "initial attempt" if attempt == 0 else f"retry attempt {attempt}"
+    chunk = (
+        f"\n=== {label} @ {now_iso} ===\n"
+        f"project:    {project}\n"
+        f"query:      {aborted.query}\n"
+        f"error:      {aborted.error}\n"
+        f"url:        {aborted.url}\n"
     )
-    log_path.write_text(body, encoding="utf-8")
+    if next_retry_unit:
+        chunk += f"next retry: {next_retry_unit}\n"
+    else:
+        chunk += "next retry: none (cap reached or unsupported platform)\n"
+    with log_path.open("a", encoding="utf-8") as fh:
+        fh.write(chunk)
     return log_path
 
 
-def _run_one(project: str) -> None:
+# A single 04:00 timer firing into a transient arXiv 429 used to lose the
+# whole night. The scheduled run now schedules up to N follow-up retries
+# 60 minutes apart, so a flaky 30-min window does not eat the briefing.
+# A normal interactive `scoop-watch run` (retry_attempt=0) only schedules
+# one retry; a retry that itself aborts schedules the next one until the
+# cap is reached.
+_RETRY_DELAY_MINUTES = 60
+_MAX_RETRY_ATTEMPTS = 3
+
+
+def _run_one(
+    project: str, retry_attempt: int = 0, session_date: str | None = None
+) -> None:
+    session_date = session_date or dt.date.today().isoformat()
     project_config = config.load_config(project)
     days = config.recent_days()
     queries = project_config["queries"]
     merged_count = len(fetch.group_queries(queries))
+    if retry_attempt:
+        ui.step(
+            f"{project}  retry attempt {retry_attempt}/{_MAX_RETRY_ATTEMPTS} "
+            f"after a previous fetch abort"
+        )
     if merged_count < len(queries):
         ui.step(
             f"{project}  fetching arXiv ({days}-day window, "
@@ -154,10 +186,40 @@ def _run_one(project: str) -> None:
             progress=ui.substep,
         )
     except fetch.FetchAborted as aborted:
-        log_path = _write_fetch_failure_log(project, aborted)
         ui.warn(f"{project}  fetch aborted; no briefing written")
+        next_attempt = retry_attempt + 1
+        unit = ""
+        if next_attempt <= _MAX_RETRY_ATTEMPTS:
+            try:
+                unit = scheduler.schedule_retry(
+                    project,
+                    next_attempt,
+                    _RETRY_DELAY_MINUTES,
+                    session_date=session_date,
+                )
+            except RuntimeError:
+                unit = ""  # platform unsupported; degrade gracefully
+            if unit:
+                ui.detail(
+                    "retry",
+                    f"scheduled attempt {next_attempt}/{_MAX_RETRY_ATTEMPTS} "
+                    f"in {_RETRY_DELAY_MINUTES} min (unit {unit})",
+                )
+            else:
+                ui.hint(
+                    "could not schedule auto-retry; rerun `scoop-watch run` manually."
+                )
+        else:
+            ui.hint(
+                f"retry cap reached ({_MAX_RETRY_ATTEMPTS} attempts); "
+                "rerun `scoop-watch run` manually."
+            )
+        # Append to the shared per-session log AFTER deciding whether to
+        # schedule a retry, so the entry records the next unit name.
+        log_path = _append_fetch_failure_log(
+            project, aborted, session_date, retry_attempt, next_retry_unit=unit
+        )
         ui.detail("log", str(log_path))
-        ui.hint("arXiv often clears in minutes. Rerun `scoop-watch run` to retry.")
         return
 
     # Same-day reruns are kept as -v2 / -v3 / ... rather than overwriting.
@@ -203,14 +265,22 @@ def _run_one(project: str) -> None:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    """Run one project, or every project when none is given."""
+    """Run one project, or every project when none is given.
+
+    ``--retry-attempt N`` (hidden) is passed by the scheduler-spawned retry
+    invocations so each run knows whether it still has retries left if its
+    fetch aborts. 0 = the user's original run (or the scheduled timer fire),
+    1..3 = follow-up retries.
+    """
+    retry_attempt = getattr(args, "retry_attempt", 0)
+    session_date = getattr(args, "session_date", None)
     projects = [args.project] if args.project else config.list_projects()
     if not projects:
         ui.warn("no projects yet")
         ui.hint("Create one with `scoop-watch author`.")
         return 0
     for project in projects:
-        _run_one(project)
+        _run_one(project, retry_attempt=retry_attempt, session_date=session_date)
     return 0
 
 
@@ -422,7 +492,11 @@ def cmd_deep(args: argparse.Namespace) -> int:
             progress=ui.substep,
         )
     except fetch.FetchAborted as aborted:
-        log_path = _write_fetch_failure_log(project, aborted)
+        # Deep mode doesn't auto-retry; the user reruns `scoop-watch deep`
+        # themselves and the fetch resumes from per-group JSONL on disk.
+        log_path = _append_fetch_failure_log(
+            project, aborted, dt.date.today().isoformat(), attempt=0
+        )
         ui.warn(f"{project}  deep fetch aborted; resume with `scoop-watch deep`")
         ui.detail("log", str(log_path))
         ui.detail(
@@ -583,6 +657,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
     run_parser = sub.add_parser("run", help="generate briefings (one project, or all)")
     run_parser.add_argument("project", nargs="?")
+    # Hidden: set by the scheduler-spawned retry invocations so each run knows
+    # which retry attempt it is and whether more retries remain after another
+    # abort. End-users don't need this; it's set programmatically.
+    run_parser.add_argument(
+        "--retry-attempt", type=int, default=0, help=argparse.SUPPRESS
+    )
+    # Hidden: the session start date (the date of the first attempt in the
+    # current scheduling cycle). All attempts in one cycle share this so
+    # their logs append to a single per-session file.
+    run_parser.add_argument("--session-date", default=None, help=argparse.SUPPRESS)
 
     resynth_parser = sub.add_parser(
         "resynth",

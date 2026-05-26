@@ -132,3 +132,33 @@ def last_run_line(project: str) -> str:
         return "never (just armed)"
     passed = parsed.get("passed", "").strip()
     return f"{last} ({passed} ago)" if passed and passed != "n/a" else last
+
+
+def schedule_retry(
+    project: str, attempt: int, delay_minutes: int, session_date: str
+) -> str:
+    """Schedule a one-shot retry via ``systemd-run --user --on-active=Nmin``.
+
+    The retry command embeds ``--retry-attempt=N`` (so it knows whether it
+    still has retries left) and ``--session-date=YYYY-MM-DD`` (so its log
+    appends to the same per-session file as the initial attempt). Returns
+    the transient unit name on success, empty string on failure.
+    """
+    unit = f"scoop-watch-{project}-retry-{attempt}"
+    shim = paths.shim_path()
+    cmd = [
+        "systemd-run",
+        "--user",
+        f"--on-active={delay_minutes}min",
+        f"--unit={unit}",
+        f"--description=scoop-watch retry {attempt} for {project}",
+        str(shim),
+        "run",
+        project,
+        f"--retry-attempt={attempt}",
+        f"--session-date={session_date}",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        return ""
+    return unit
