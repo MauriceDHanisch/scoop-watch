@@ -1,6 +1,7 @@
 """Tests for CLI command dispatch."""
 
 import argparse
+import sys
 
 import pytest
 
@@ -205,6 +206,62 @@ def test_run_appends_each_attempt_to_one_per_session_log(monkeypatch, tmp_path):
     assert sorted(p.name for p in (tmp_path / "logs").iterdir()) == [
         "demo_2026-05-25.log"
     ]
+
+
+def test_run_captures_all_stdout_into_the_session_log(monkeypatch, tmp_path):
+    """The per-session log captures everything the run prints, not just
+    the structured fetch-abort chunk. Regression for synthesis-stage
+    failures (e.g. agent not on PATH) that previously only landed in the
+    systemd journal, leaving the log misleadingly thin."""
+    monkeypatch.setenv("WATCH_DATA_DIR", str(tmp_path))
+    (tmp_path / "projects" / "demo").mkdir(parents=True)
+    (tmp_path / "projects" / "demo" / "project.md").write_text("x", encoding="utf-8")
+    (tmp_path / "projects" / "demo" / "layout.md").write_text("x", encoding="utf-8")
+    (tmp_path / "projects" / "demo" / "config.yaml").write_text(
+        "categories: []\nqueries:\n  - name: q\n    operator: OR\n    terms: [x]\n",
+        encoding="utf-8",
+    )
+
+    sentinel = "UNIQUE-SYNTHESIS-FAILURE-MARKER-42"
+
+    def fake_fetch(*args, **kwargs):
+        return []  # zero papers, synthesis is the next step
+
+    def fake_synthesize(*args, **kwargs):
+        raise RuntimeError(sentinel)
+
+    monkeypatch.setattr(cli.fetch, "fetch", fake_fetch)
+    monkeypatch.setattr(cli.fetch, "group_queries", lambda qs: [])
+    monkeypatch.setattr(cli.synthesize, "synthesize", fake_synthesize)
+
+    with pytest.raises(RuntimeError):
+        cli.cmd_run(
+            argparse.Namespace(project="demo", retry_attempt=0, session_date="2026-05-25")
+        )
+
+    text = (tmp_path / "logs" / "demo_2026-05-25.log").read_text(encoding="utf-8")
+    # Run header is present.
+    assert "--- initial attempt stdout @" in text
+    # The synthesis exception traceback landed in the log.
+    assert "--- traceback ---" in text
+    assert sentinel in text
+    # Closing footer with timestamp is present.
+    assert "--- initial attempt ended @" in text
+
+
+def test_session_log_strips_ansi_color_codes(monkeypatch, tmp_path):
+    """Colored ui.step / ui.ok output writes to the terminal with ANSI
+    codes but to the log file without them, so `cat` over a log reads
+    cleanly."""
+    monkeypatch.setenv("WATCH_DATA_DIR", str(tmp_path))
+
+    with cli._tee_to_session_log("demo", "2026-05-25", attempt=0):
+        sys.stdout.write("\x1b[31mhello\x1b[0m world\n")
+        sys.stdout.flush()
+
+    text = (tmp_path / "logs" / "demo_2026-05-25.log").read_text(encoding="utf-8")
+    assert "hello world" in text
+    assert "\x1b[" not in text
 
 
 def test_arm_uses_the_global_schedule(monkeypatch, tmp_path):

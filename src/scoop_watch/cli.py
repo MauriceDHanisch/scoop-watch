@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import json
+import re
 import sys
+import traceback
 from pathlib import Path
 
 from . import (
@@ -152,11 +155,92 @@ def _append_fetch_failure_log(
 _RETRY_DELAY_MINUTES = 60
 _MAX_RETRY_ATTEMPTS = 3
 
+# ANSI SGR escape sequences (colors / styles emitted by ui.py). Stripped
+# before writing to the log file so cat / grep over the log stays clean;
+# the live terminal still sees full color.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+class _Tee:
+    """File-like object that writes to ``stream`` and appends to ``fh``.
+
+    ANSI color codes are stripped from the file copy. ``isatty`` is
+    delegated so libraries that check it (rich, click) see the real
+    terminal's value, not the log file's.
+    """
+
+    def __init__(self, stream, fh) -> None:
+        self._stream = stream
+        self._fh = fh
+
+    def write(self, data: str) -> int:
+        self._stream.write(data)
+        try:
+            self._fh.write(_ANSI_RE.sub("", data))
+            self._fh.flush()
+        except Exception:  # log file errors must never break the live run
+            pass
+        return len(data)
+
+    def flush(self) -> None:
+        self._stream.flush()
+        try:
+            self._fh.flush()
+        except Exception:
+            pass
+
+    def isatty(self) -> bool:
+        return self._stream.isatty()
+
+    def fileno(self) -> int:
+        return self._stream.fileno()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+@contextlib.contextmanager
+def _tee_to_session_log(project: str, session_date: str, attempt: int):
+    """Tee stdout + stderr into ``logs/<project>_<session_date>.log``.
+
+    Every printed line from the run, plus any exception traceback, lands
+    in the per-session log alongside the structured fetch-abort chunks.
+    A morning post-mortem can read the whole file top-to-bottom and see
+    exactly what each attempt did, including synthesis-stage failures
+    that previously only existed in the systemd journal.
+    """
+    logs = paths.logs_dir()
+    logs.mkdir(parents=True, exist_ok=True)
+    log_path = logs / f"{project}_{session_date}.log"
+    label = "initial attempt" if attempt == 0 else f"retry attempt {attempt}"
+    started = dt.datetime.now().isoformat(timespec="seconds")
+    with log_path.open("a", encoding="utf-8") as fh:
+        fh.write(f"\n--- {label} stdout @ {started} ---\n")
+        fh.flush()
+        original_stdout, original_stderr = sys.stdout, sys.stderr
+        sys.stdout = _Tee(original_stdout, fh)
+        sys.stderr = _Tee(original_stderr, fh)
+        try:
+            yield log_path
+        except BaseException:
+            fh.write("\n--- traceback ---\n")
+            fh.write(traceback.format_exc())
+            raise
+        finally:
+            sys.stdout, sys.stderr = original_stdout, original_stderr
+            ended = dt.datetime.now().isoformat(timespec="seconds")
+            fh.write(f"--- {label} ended @ {ended} ---\n")
+
 
 def _run_one(
     project: str, retry_attempt: int = 0, session_date: str | None = None
 ) -> None:
     session_date = session_date or dt.date.today().isoformat()
+    with _tee_to_session_log(project, session_date, retry_attempt):
+        _run_one_body(project, retry_attempt, session_date)
+
+
+def _run_one_body(project: str, retry_attempt: int, session_date: str) -> None:
     project_config = config.load_config(project)
     days = config.recent_days()
     queries = project_config["queries"]
