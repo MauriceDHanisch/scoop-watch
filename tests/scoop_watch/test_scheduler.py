@@ -29,7 +29,7 @@ def test_on_calendar_subset_keeps_weekday_order():
 
 def test_service_template_runs_the_project():
     text = scheduler._SERVICE_TEMPLATE.format(
-        project="demo", shim="/bin/scoop-watch", path=scheduler._SERVICE_PATH
+        project="demo", shim="/bin/scoop-watch", path=scheduler._SERVICE_PATH_SPECIFIER
     )
     assert "ExecStart=/bin/scoop-watch run demo" in text
     assert "Type=oneshot" in text
@@ -41,16 +41,21 @@ def test_service_template_exports_user_local_bin_on_path():
     to system dirs only. The armed service must add %h/.local/bin (where
     claude / codex / uv normally live) so synthesis can find the agent."""
     text = scheduler._SERVICE_TEMPLATE.format(
-        project="demo", shim="/bin/scoop-watch", path=scheduler._SERVICE_PATH
+        project="demo", shim="/bin/scoop-watch", path=scheduler._SERVICE_PATH_SPECIFIER
     )
     assert "Environment=PATH=" in text
     assert "%h/.local/bin" in text
 
 
-def test_schedule_retry_exports_user_local_bin_on_path(monkeypatch):
-    """Same PATH issue applies to the transient retry unit — it must also
-    carry %h/.local/bin via --setenv=PATH=..."""
+def test_schedule_retry_exports_resolved_home_dir_on_path(monkeypatch):
+    """Regression: the first PATH fix shipped %h/.local/bin to BOTH the
+    armed service template (correct: systemd expands %h in unit files)
+    AND to `systemd-run --setenv` (wrong: --setenv values are taken
+    literally, so the retry's PATH ended up containing the literal
+    string "%h" and synthesis still failed with "claude not found").
+    The transient retry must carry the expanded $HOME-prefixed PATH."""
     import subprocess
+    from pathlib import Path
 
     captured: dict = {}
 
@@ -66,7 +71,9 @@ def test_schedule_retry_exports_user_local_bin_on_path(monkeypatch):
     )
     path_flags = [arg for arg in captured["cmd"] if arg.startswith("--setenv=PATH=")]
     assert path_flags, "transient retry unit must export PATH"
-    assert "%h/.local/bin" in path_flags[0]
+    flag = path_flags[0]
+    assert "%h" not in flag, "must NOT contain unexpanded %h specifier"
+    assert f"{Path.home()}/.local/bin" in flag
 
 
 def test_parse_list_timers_splits_columns_around_double_spaces():

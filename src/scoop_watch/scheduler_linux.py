@@ -9,18 +9,33 @@ from __future__ import annotations
 
 import re
 import subprocess
+from pathlib import Path
 
 from . import config, paths
 
 # systemd's --user manager starts services with a stripped PATH that does
-# NOT include %h/.local/bin, where the agent CLIs (claude, codex) and uv
-# typically install. Without this Environment= line, an overnight run that
+# NOT include ~/.local/bin, where the agent CLIs (claude, codex) and uv
+# typically install. Without an explicit PATH, an overnight run that
 # reaches synthesis fails with "'claude' not found on PATH" even though
-# the interactive shell finds it. Keep the value broad enough to cover
-# both pipx-style installs (~/.local/bin) and system installs.
-_SERVICE_PATH = (
+# the interactive shell finds it.
+#
+# Two forms: %h is a systemd specifier that expands inside unit files
+# (the armed .service) but is taken literally inside `systemd-run
+# --setenv`, so the transient retry unit needs the resolved home dir
+# baked in instead. Discovered the hard way when the first fix shipped
+# %h to both sites and the retry's PATH ended up as literal "%h/...".
+_SERVICE_PATH_SPECIFIER = (
     "%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 )
+
+
+def _retry_path() -> str:
+    """PATH for the transient retry unit, with $HOME pre-expanded."""
+    home = str(Path.home())
+    return (
+        f"{home}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    )
+
 
 _SERVICE_TEMPLATE = """[Unit]
 Description=scoop-watch briefing for {project}
@@ -71,7 +86,7 @@ def arm(project: str, weekdays: list[str], time: str) -> None:
 
     (unit_dir / f"{stem}.service").write_text(
         _SERVICE_TEMPLATE.format(
-            project=project, shim=paths.shim_path(), path=_SERVICE_PATH
+            project=project, shim=paths.shim_path(), path=_SERVICE_PATH_SPECIFIER
         ),
         encoding="utf-8",
     )
@@ -167,7 +182,7 @@ def schedule_retry(
         f"--description=scoop-watch retry {attempt} for {project}",
         # Same PATH issue as the armed service: the transient unit also
         # needs %h/.local/bin to find claude / codex / uv at synthesis.
-        f"--setenv=PATH={_SERVICE_PATH}",
+        f"--setenv=PATH={_retry_path()}",
         str(shim),
         "run",
         project,
